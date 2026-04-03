@@ -1,0 +1,19 @@
+*.yaml
+!example-config.yaml
+!.pre-commit-config.yaml
+!compose.yaml
+!mautrix-teams.sysusers
+!mautrix-teams.tmpfiles
+
+*.db*
+*.log*
+
+/mautrix-teams
+/start
+
+# makepkg build output (under packaging/arch/ or anywhere else)
+**/src/
+packaging/arch/pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+packaging/arch/*.tar.gz
