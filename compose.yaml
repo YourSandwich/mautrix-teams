@@ -1,0 +1,61 @@
+# Development stack for testing mautrix-teams end-to-end.
+#
+# Spins up a Synapse + Postgres pair on localhost so the bridge (run natively
+# from the working tree via ./build.sh) can register against it. The bridge
+# itself is NOT containerised here so you can iterate on it quickly.
+#
+# First run (generate the Synapse signing key and default config):
+#   podman-compose --profile generate up synapse-generate
+# Then drop the generate profile and boot the real stack:
+#   podman-compose up -d
+#
+# Also works with `docker compose` unchanged.
+
+volumes:
+  mautrix-teams-pg:
+  mautrix-teams-synapse:
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapse
+      POSTGRES_DB: synapse
+      POSTGRES_INITDB_ARGS: --lc-collate C --lc-ctype C --encoding UTF8
+    volumes:
+      - mautrix-teams-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  synapse-generate:
+    image: ghcr.io/element-hq/synapse:latest
+    profiles: ["generate"]
+    environment:
+      SYNAPSE_SERVER_NAME: matrix.test
+      SYNAPSE_REPORT_STATS: "no"
+    command: ["generate"]
+    volumes:
+      - mautrix-teams-synapse:/data
+
+  synapse:
+    image: ghcr.io/element-hq/synapse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8008:8008"
+    volumes:
+      - mautrix-teams-synapse:/data
+      # The bridge registration file goes here; Synapse loads it on boot.
+      - ./registration.yaml:/data/appservices/mautrix-teams.yaml:ro,z
+    healthcheck:
+      test: ["CMD", "curl", "-fSs", "http://localhost:8008/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
