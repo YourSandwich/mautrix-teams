@@ -17,6 +17,7 @@ package msteams
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +35,21 @@ const (
 
 	workOAuthResource = "https://api.spaces.skype.com"
 	workOAuthScope    = workOAuthResource + "/.default openid profile offline_access"
+
+	// csaOAuthScope is the audience the chat-service-aggregator (teams.microsoft.com/api/csa)
+	// demands. The skype-scope bearer works for the chat-service and AMS, but
+	// csa rejects it with "User is not authorized."; a second refresh-token
+	// grant against this scope yields the right audience.
+	csaOAuthScope = "https://chatsvcagg.teams.microsoft.com/.default offline_access"
+
+	// searchOAuthScope authorises the substrate.office.com unified-search
+	// endpoint that powers Teams' people picker (start-chat / search).
+	searchOAuthScope = "https://outlook.office.com/search/.default offline_access"
+
+	// delveOAuthScope authorises the loki.delve.office.com person card API
+	// (rich profile: phones, postal address, manager, etc.). The audience GUID
+	// is the Office Loki Delve service registration.
+	delveOAuthScope = "394866fc-eedb-4f01-8536-3ff84b16be2a/.default offline_access"
 
 	workAuthzURL     = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 	personalAuthzURL = "https://teams.live.com/api/auth/v1.0/authz/consumer"
@@ -64,14 +80,24 @@ type oauthTokenResponse struct {
 }
 
 // authzResponse matches teams.microsoft.com/api/authsvc/v1.0/authz.
+//
+// The `regionGtms` map carries the fully-qualified URLs the account should
+// use. Previously the bridge tried to construct them from `region` alone
+// ("amer" -> "https://amer.ng.msg.teams.microsoft.com"), but many tenants
+// (especially EU / country-pinned ones) return a `userRegion` like "at" and a
+// chatService URL of "https://at.ng.msg.teams.microsoft.com" that can't be
+// derived from `region`.
 type authzResponse struct {
 	Tokens struct {
 		SkypeToken string `json:"skypeToken"`
 		ExpiresIn  int    `json:"expiresIn"`
 		TokenType  string `json:"tokenType"`
 	} `json:"tokens"`
-	Region     string `json:"region"`
-	Partition  string `json:"partition"`
+	Region        string            `json:"region"`
+	Partition     string            `json:"partition"`
+	UserRegion    string            `json:"userRegion"`
+	UserPartition string            `json:"userPartition"`
+	RegionGtms    map[string]string `json:"regionGtms"`
 }
 
 // SnapshotRefresh returns the current refresh-token string (or "").
@@ -97,7 +123,8 @@ func (c *Client) SnapshotTokens() (auth, skype *Token) {
 }
 
 // refreshOAuthToken runs the FOCI refresh-token grant for the given scope and
-// returns the decoded response.
+// returns the decoded response. It leaves the cached token slots untouched;
+// the caller decides which slot to fill.
 func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride string) (*oauthTokenResponse, error) {
 	c.tokenLock.RLock()
 	refresh := c.refresh
@@ -157,6 +184,7 @@ func (c *Client) storeOAuthToken(slot **Token, out *oauthTokenResponse) {
 }
 
 func (c *Client) RefreshAuthToken(ctx context.Context) error {
+	// Consumer accounts must hit the `consumers` alias; AAD rejects the raw MSA GUID.
 	tenantOverride := ""
 	if IsConsumerTenant(c.cfg.TenantID) {
 		tenantOverride = "consumers"
@@ -169,7 +197,72 @@ func (c *Client) RefreshAuthToken(ctx context.Context) error {
 	return nil
 }
 
-// RefreshSkypeToken mints a chat-service skype token.
+func (c *Client) RefreshCsaToken(ctx context.Context) error {
+	// Consumer accounts have no aggregator; teams.live.com serves the data inline.
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, csaOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.csaAuth, out)
+	return nil
+}
+
+func (c *Client) RefreshSearchToken(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, searchOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.searchAuth, out)
+	return nil
+}
+
+func (c *Client) RefreshDelveToken(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, delveOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.delveAuth, out)
+	return nil
+}
+
+func (c *Client) RefreshSharePointToken(ctx context.Context, host string) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	if host == "" {
+		return fmt.Errorf("empty sharepoint host")
+	}
+	scope := "https://" + host + "/.default offline_access"
+	out, err := c.refreshOAuthToken(ctx, scope, "")
+	if err != nil {
+		return err
+	}
+	c.tokenLock.Lock()
+	if c.sharePointAuth == nil {
+		c.sharePointAuth = make(map[string]*Token)
+	}
+	c.sharePointAuth[host] = &Token{
+		Value:     out.AccessToken,
+		ExpiresAt: time.Now().Add(time.Duration(out.ExpiresIn) * time.Second),
+	}
+	if out.RefreshToken != "" {
+		c.refresh = out.RefreshToken
+	}
+	c.tokenLock.Unlock()
+	return nil
+}
+
+// RefreshSkypeToken mints a chat-service skype token. Empty cfg.TenantID picks
+// the personal endpoint since work/school accounts always carry a tenant GUID.
 func (c *Client) RefreshSkypeToken(ctx context.Context) error {
 	c.tokenLock.RLock()
 	auth := c.auth
@@ -219,31 +312,60 @@ func (c *Client) RefreshSkypeToken(ctx context.Context) error {
 		ExpiresAt: time.Now().Add(time.Duration(out.Tokens.ExpiresIn) * time.Second),
 	}
 	c.tokenLock.Unlock()
+	c.applyAuthzEndpoints(out)
 	return nil
 }
 
-// ChatSvcBase returns the chat-service base URL.
-func (c *Client) ChatSvcBase() string {
-	return c.chatSvcBase
+// applyAuthzEndpoints picks up the canonical service URLs out of an authz
+// response. If the operator pinned an endpoint in ClientConfig.Endpoints we
+// never overwrite it.
+func (c *Client) applyAuthzEndpoints(resp authzResponse) {
+	if chat := resp.RegionGtms["chatService"]; chat != "" && c.cfg.Endpoints.ChatSvcBase == "" {
+		c.chatSvcBase = chat
+	}
+	if mt := resp.RegionGtms["middleTier"]; mt != "" && c.cfg.Endpoints.MTBase == "" {
+		c.mtBase = mt
+	}
+	if csa := resp.RegionGtms["chatSvcAggAfd"]; csa != "" {
+		c.csaBase = csa
+	}
+	// AMS (the asset / media service) is regional just like chatService.
+	// Teams includes it under the "mediaStream" key, and sometimes simply
+	// "ams" for consumer tenants. Prefer the explicit values; fall back to
+	// the work default if nothing is advertised.
+	for _, key := range []string{"ams", "mediaStream"} {
+		if url := resp.RegionGtms[key]; url != "" && c.cfg.Endpoints.AMSBase == "" {
+			c.amsBase = url
+			break
+		}
+	}
+	// Loki/Delve people-card service is hosted in three GEO partitions
+	// (nam/eur/apc); pick the right prefix from the user's data residency.
+	c.delveBase = "https://" + lokiPrefixFor(resp) + ".loki.delve.office.com"
+	c.log.Debug().
+		Str("region", resp.Region).
+		Str("user_region", resp.UserRegion).
+		Str("partition", resp.Partition).
+		Str("user_partition", resp.UserPartition).
+		Interface("region_gtms", resp.RegionGtms).
+		Str("chat_svc", c.chatSvcBase).
+		Str("mt", c.mtBase).
+		Str("csa", c.csaBase).
+		Str("ams", c.amsBase).
+		Str("delve", c.delveBase).
+		Msg("Applied authz endpoints")
 }
 
-// ensureFreshTokens refreshes expired tokens before an authenticated request
-// would fail.
-func (c *Client) ensureFreshTokens(ctx context.Context, needBearer, needSkype bool) error {
-	c.tokenLock.RLock()
-	authExp := c.auth != nil && c.auth.Expired()
-	skypeExp := c.skype != nil && c.skype.Expired()
-	c.tokenLock.RUnlock()
-
-	if needBearer && authExp {
-		if err := c.RefreshAuthToken(ctx); err != nil {
-			return fmt.Errorf("refresh auth token: %w", err)
-		}
+// lokiPrefixFor maps Microsoft's data-residency partition codes onto the
+// Loki/Delve subdomain prefix. Partitions are formatted as "<region><nn>"
+// (e.g. "at01", "amer03", "apac02"); we look at the leading geo letters.
+// Defaults to "nam" since the global anycast routes there.
+func lokiPrefixFor(resp authzResponse) string {
+	switch strings.ToLower(resp.Region) {
+	case "eur", "emea":
+		return "eur"
+	case "apc", "apac":
+		return "apc"
 	}
-	if needSkype && skypeExp {
-		if err := c.RefreshSkypeToken(ctx); err != nil {
-			return fmt.Errorf("refresh skype token: %w", err)
-		}
-	}
-	return nil
+	return "nam"
 }
