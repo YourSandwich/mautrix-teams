@@ -361,11 +361,27 @@ func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 // (e.g. "at01", "amer03", "apac02"); we look at the leading geo letters.
 // Defaults to "nam" since the global anycast routes there.
 func lokiPrefixFor(resp authzResponse) string {
-	switch strings.ToLower(resp.Region) {
-	case "eur", "emea":
-		return "eur"
-	case "apc", "apac":
-		return "apc"
+	for _, p := range []string{resp.UserPartition, resp.Partition, resp.UserRegion, resp.Region} {
+		switch loc := strings.ToLower(p); {
+		case loc == "":
+			continue
+		case strings.HasPrefix(loc, "eur"), strings.HasPrefix(loc, "emea"),
+			strings.HasPrefix(loc, "at"), strings.HasPrefix(loc, "de"),
+			strings.HasPrefix(loc, "fr"), strings.HasPrefix(loc, "uk"),
+			strings.HasPrefix(loc, "nl"), strings.HasPrefix(loc, "es"),
+			strings.HasPrefix(loc, "it"), strings.HasPrefix(loc, "pl"),
+			strings.HasPrefix(loc, "ch"), strings.HasPrefix(loc, "ie"),
+			strings.HasPrefix(loc, "se"), strings.HasPrefix(loc, "no"):
+			return "eur"
+		case strings.HasPrefix(loc, "apc"), strings.HasPrefix(loc, "apac"),
+			strings.HasPrefix(loc, "au"), strings.HasPrefix(loc, "jp"),
+			strings.HasPrefix(loc, "in"), strings.HasPrefix(loc, "sg"),
+			strings.HasPrefix(loc, "hk"), strings.HasPrefix(loc, "kr"):
+			return "apc"
+		case strings.HasPrefix(loc, "nam"), strings.HasPrefix(loc, "amer"),
+			strings.HasPrefix(loc, "us"), strings.HasPrefix(loc, "ca"):
+			return "nam"
+		}
 	}
 	return "nam"
 }
