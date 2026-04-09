@@ -32,6 +32,11 @@ const (
 	DefaultMTBase      = "https://teams.microsoft.com/api/mt/part/emea-03"
 	DefaultTrouterBase = "https://go.trouter.teams.microsoft.com/v4"
 	DefaultAMSBase     = "https://teams.microsoft.com/api/amsMTProd"
+
+	// AMS's platform-id regex accepts only SkypeOfficialClient/<build>/<ver>.
+	// Other values (Teams/*, Mozilla/*, SkypeiOS/*, SkypeTeams/*) get a 400.
+	teamsWebUserAgent  = "SkypeOfficialClient/0/0.0.0.0"
+	teamsAMSClientType = "SkypeSpacesWeb"
 )
 
 type ClientConfig struct {
@@ -45,8 +50,6 @@ type ClientConfig struct {
 	Logger       zerolog.Logger
 }
 
-// Endpoints overrides the default commercial-cloud URLs. Empty fields fall
-// back to the package defaults; tests set these to httptest.Server URLs.
 type Endpoints struct {
 	TokenURL    string
 	AuthzURL    string
@@ -78,11 +81,18 @@ type Client struct {
 	tokenEndpointForTest string
 	chatSvcBase          string
 	mtBase               string
+	csaBase              string
+	amsBase              string
+	delveBase            string
 
-	tokenLock sync.RWMutex
-	skype     *Token
-	auth      *Token
-	refresh   string
+	tokenLock      sync.RWMutex
+	skype          *Token
+	auth           *Token
+	csaAuth        *Token
+	searchAuth     *Token
+	delveAuth      *Token
+	sharePointAuth map[string]*Token
+	refresh        string
 
 	connected atomic.Bool
 	closed    atomic.Bool
@@ -91,6 +101,103 @@ type Client struct {
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	wg         sync.WaitGroup
+
+	trouterSURL     atomic.Pointer[string]
+	trouterEndpoint atomic.Pointer[string]
+	trouterCount    atomic.Uint64
+	trouterCmdSeq   atomic.Uint64
+
+	cachedNamesLock sync.RWMutex
+	cachedNames     map[string]string
+
+	// cachedProfiles holds rich substrate-search results keyed by MRI so
+	// GetUser can return phones/department/etc without a second roundtrip.
+	cachedProfilesLock sync.RWMutex
+	cachedProfiles     map[string]*User
+
+	// sentMessages dedupes our own outbound messages so the Trouter echo
+	// doesn't bounce back to Matrix as a duplicate.
+	sentMessagesLock sync.Mutex
+	sentMessages     map[string]struct{}
+}
+
+func (c *Client) MarkSent(clientMessageID string) {
+	if clientMessageID == "" {
+		return
+	}
+	c.sentMessagesLock.Lock()
+	defer c.sentMessagesLock.Unlock()
+	if c.sentMessages == nil {
+		c.sentMessages = make(map[string]struct{})
+	}
+	c.sentMessages[clientMessageID] = struct{}{}
+	if len(c.sentMessages) > 4096 {
+		i := 0
+		for k := range c.sentMessages {
+			delete(c.sentMessages, k)
+			i++
+			if i > 1024 {
+				break
+			}
+		}
+	}
+}
+
+func (c *Client) claimSent(clientMessageID string) bool {
+	if clientMessageID == "" {
+		return false
+	}
+	c.sentMessagesLock.Lock()
+	defer c.sentMessagesLock.Unlock()
+	if _, ok := c.sentMessages[clientMessageID]; !ok {
+		return false
+	}
+	delete(c.sentMessages, clientMessageID)
+	return true
+}
+
+func (c *Client) CachedDisplayName(mri string) string {
+	c.cachedNamesLock.RLock()
+	defer c.cachedNamesLock.RUnlock()
+	return c.cachedNames[mri]
+}
+
+func (c *Client) CacheDisplayName(mri, name string) {
+	if mri == "" || name == "" {
+		return
+	}
+	c.cachedNamesLock.Lock()
+	defer c.cachedNamesLock.Unlock()
+	if c.cachedNames == nil {
+		c.cachedNames = make(map[string]string)
+	}
+	c.cachedNames[mri] = name
+}
+
+func (c *Client) CacheUserProfile(u *User) {
+	if u == nil || u.MRI == "" {
+		return
+	}
+	cp := *u
+	c.cachedProfilesLock.Lock()
+	if c.cachedProfiles == nil {
+		c.cachedProfiles = make(map[string]*User)
+	}
+	c.cachedProfiles[u.MRI] = &cp
+	c.cachedProfilesLock.Unlock()
+	if u.DisplayName != "" {
+		c.CacheDisplayName(u.MRI, u.DisplayName)
+	}
+}
+
+func (c *Client) CachedUserProfile(mri string) *User {
+	c.cachedProfilesLock.RLock()
+	defer c.cachedProfilesLock.RUnlock()
+	if u, ok := c.cachedProfiles[mri]; ok {
+		cp := *u
+		return &cp
+	}
+	return nil
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -130,12 +237,33 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err := c.refreshAllTokens(ctx); err != nil {
 		return fmt.Errorf("refresh tokens: %w", err)
 	}
+	if err := c.startTrouter(ctx); err != nil {
+		return fmt.Errorf("start trouter: %w", err)
+	}
 	c.connected.Store(true)
 	return nil
 }
 
 func (c *Client) refreshAllTokens(ctx context.Context) error {
-	return c.RefreshSkypeToken(ctx)
+	err := c.RefreshSkypeToken(ctx)
+	if err == nil {
+		return nil
+	}
+	c.log.Debug().Err(err).Msg("Skype token refresh failed; trying AAD refresh-token grant")
+
+	c.tokenLock.RLock()
+	hasRefresh := c.refresh != ""
+	c.tokenLock.RUnlock()
+	if !hasRefresh {
+		return fmt.Errorf("skype refresh: %w (and no refresh_token to recover)", err)
+	}
+	if err := c.RefreshAuthToken(ctx); err != nil {
+		return fmt.Errorf("aad refresh: %w", err)
+	}
+	if err := c.RefreshSkypeToken(ctx); err != nil {
+		return fmt.Errorf("skype refresh after aad refresh: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) Close() error {
