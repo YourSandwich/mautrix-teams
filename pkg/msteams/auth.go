@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,13 +62,10 @@ const (
 	MSATenantID = "9188040d-6c67-4c5b-b112-36a304b66dad"
 )
 
-// IsConsumerTenant returns true if the given tenant GUID represents a Microsoft
-// Account (consumer) rather than an AAD organisation.
 func IsConsumerTenant(tenantID string) bool {
 	return tenantID == MSATenantID
 }
 
-// oauthTokenResponse is the AAD token endpoint response shape.
 type oauthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -100,14 +98,12 @@ type authzResponse struct {
 	RegionGtms    map[string]string `json:"regionGtms"`
 }
 
-// SnapshotRefresh returns the current refresh-token string (or "").
 func (c *Client) SnapshotRefresh() string {
 	c.tokenLock.RLock()
 	defer c.tokenLock.RUnlock()
 	return c.refresh
 }
 
-// SnapshotTokens returns copies of the currently cached tokens.
 func (c *Client) SnapshotTokens() (auth, skype *Token) {
 	c.tokenLock.RLock()
 	defer c.tokenLock.RUnlock()
@@ -173,7 +169,6 @@ func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride st
 	return &out, nil
 }
 
-// storeOAuthToken writes a refreshed token into slot and rolls the refresh token forward.
 func (c *Client) storeOAuthToken(slot **Token, out *oauthTokenResponse) {
 	c.tokenLock.Lock()
 	defer c.tokenLock.Unlock()
@@ -384,4 +379,200 @@ func lokiPrefixFor(resp authzResponse) string {
 		}
 	}
 	return "nam"
+}
+
+// DeviceCodeResponse is the Microsoft identity platform /devicecode reply.
+type DeviceCodeResponse struct {
+	UserCode        string `json:"user_code"`
+	DeviceCode      string `json:"device_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+	Message         string `json:"message"`
+}
+
+// DeviceCodeToken is the successful /token response for the device-code grant.
+type DeviceCodeToken struct {
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	ExpiresAt    time.Time
+}
+
+// ErrDeviceCodeDeclined is returned when the user explicitly rejects the login
+// in the browser. The caller should surface this as a terminal failure rather
+// than retry.
+var ErrDeviceCodeDeclined = errors.New("device code login declined by user")
+
+// StartDeviceCode opens an OAuth device-code flow against the Microsoft
+// identity platform using the Teams work client ID. tenant should be
+// "organizations" for work/school accounts, or a tenant GUID when already
+// known. httpClient may be nil to use http.DefaultClient.
+func StartDeviceCode(ctx context.Context, httpClient *http.Client, tenant string) (*DeviceCodeResponse, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if tenant == "" {
+		tenant = "organizations"
+	}
+	form := url.Values{}
+	form.Set("client_id", WorkOAuthClientID)
+	form.Set("scope", workOAuthScope)
+	endpoint := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/devicecode", tenant)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("devicecode: %d %s", resp.StatusCode, string(body))
+	}
+	var out DeviceCodeResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode devicecode response: %w", err)
+	}
+	if out.DeviceCode == "" || out.UserCode == "" {
+		return nil, fmt.Errorf("devicecode response missing codes")
+	}
+	if out.Interval <= 0 {
+		out.Interval = 5
+	}
+	return &out, nil
+}
+
+// PollDeviceCode polls the token endpoint until the user completes the browser
+// flow, the device code expires, or ctx is cancelled. The initial poll happens
+// after `interval`; Azure may ask us to back off via a `slow_down` response,
+// which we honour.
+func PollDeviceCode(ctx context.Context, httpClient *http.Client, tenant, deviceCode string, interval time.Duration) (*DeviceCodeToken, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if tenant == "" {
+		tenant = "organizations"
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	endpoint := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenant)
+
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+
+		form := url.Values{}
+		form.Set("client_id", WorkOAuthClientID)
+		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+		form.Set("device_code", deviceCode)
+
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		resp.Body.Close()
+
+		var tok oauthTokenResponse
+		if err := json.Unmarshal(body, &tok); err != nil {
+			return nil, fmt.Errorf("decode token response: %w", err)
+		}
+
+		if tok.AccessToken != "" {
+			return &DeviceCodeToken{
+				AccessToken:  tok.AccessToken,
+				RefreshToken: tok.RefreshToken,
+				IDToken:      tok.IDToken,
+				ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second),
+			}, nil
+		}
+
+		switch tok.Error {
+		case "authorization_pending":
+			timer.Reset(interval)
+		case "slow_down":
+			interval += 5 * time.Second
+			timer.Reset(interval)
+		case "expired_token", "code_expired":
+			return nil, fmt.Errorf("device code expired before login completed")
+		case "authorization_declined", "access_denied":
+			return nil, ErrDeviceCodeDeclined
+		default:
+			return nil, fmt.Errorf("token endpoint: %s: %s", tok.Error, tok.ErrorDesc)
+		}
+	}
+}
+
+// IDTokenClaims is the subset of standard AAD id_token claims the bridge cares about.
+type IDTokenClaims struct {
+	TenantID    string `json:"tid"`
+	ObjectID    string `json:"oid"`
+	DisplayName string `json:"name"`
+	Email       string `json:"email"`
+	UPN         string `json:"upn"`
+	PreferredUN string `json:"preferred_username"`
+}
+
+// ParseIDToken decodes the unverified payload of an AAD id_token JWT.
+func ParseIDToken(idToken string) (*IDTokenClaims, error) {
+	parts := strings.Split(idToken, ".")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("id_token is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var c IDTokenClaims
+	if err := json.Unmarshal(payload, &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (c *Client) ChatSvcBase() string {
+	return c.chatSvcBase
+}
+
+// ensureFreshTokens refreshes expired tokens before an authenticated request
+// would fail. Callers still need to handle a delayed 401 (token was revoked
+// mid-flight); this is a best-effort pre-check.
+func (c *Client) ensureFreshTokens(ctx context.Context, needBearer, needSkype bool) error {
+	c.tokenLock.RLock()
+	authExp := c.auth != nil && c.auth.Expired()
+	skypeExp := c.skype != nil && c.skype.Expired()
+	c.tokenLock.RUnlock()
+
+	if needBearer && authExp {
+		if err := c.RefreshAuthToken(ctx); err != nil {
+			return fmt.Errorf("refresh auth token: %w", err)
+		}
+	}
+	if needSkype && skypeExp {
+		if err := c.RefreshSkypeToken(ctx); err != nil {
+			return fmt.Errorf("refresh skype token: %w", err)
+		}
+	}
+	return nil
 }
