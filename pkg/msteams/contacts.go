@@ -17,7 +17,10 @@ package msteams
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -32,12 +35,12 @@ type rawConversation struct {
 	ThreadProperties rawThreadProps  `json:"threadProperties"`
 	Members          []rawMember     `json:"members"`
 	LastMessage      *rawMessageStub `json:"lastMessage"`
-	Type             string          `json:"type"`
+	Type             string          `json:"type"` // "Thread" for groups, missing for 1:1
 }
 
 type rawThreadProps struct {
 	Topic              string `json:"topic"`
-	ChatType           string `json:"chatType"`
+	ChatType           string `json:"chatType"` // meeting, group, or empty
 	UniqueRosterThread string `json:"uniquerosterthread"`
 	ProductThreadType  string `json:"productThreadType"`
 }
@@ -87,70 +90,172 @@ func (c *Client) GetChat(ctx context.Context, threadID string) (*Chat, error) {
 	return &chat, nil
 }
 
-func convertRawConversation(r *rawConversation) Chat {
-	c := Chat{
-		ID:    r.ID,
-		Topic: r.ThreadProperties.Topic,
-	}
-	c.Type = classifyChat(r)
-	for _, m := range r.Members {
-		mri := m.MRI
-		if mri == "" {
-			mri = m.ID
-		}
-		if mri == "" {
-			continue
-		}
-		c.Members = append(c.Members, Member{MRI: mri, Role: m.Role})
-	}
-	if r.LastMessage != nil {
-		c.LastUpdated = ParseTeamsTime(r.LastMessage.ComposeTime)
-	}
-	if len(c.Members) == 0 {
-		if peers := peersFromThreadID(r.ID); len(peers) > 0 {
-			for _, p := range peers {
-				c.Members = append(c.Members, Member{MRI: p})
-			}
-		}
-	}
-	return c
+type rawUserProfile struct {
+	MRI               string `json:"mri"`
+	ObjectID          string `json:"objectId"`
+	DisplayName       string `json:"displayName"`
+	GivenName         string `json:"givenName"`
+	Surname           string `json:"surname"`
+	Email             string `json:"email"`
+	UserPrincipalName string `json:"userPrincipalName"`
+	JobTitle          string `json:"jobTitle"`
+	ImageURL          string `json:"profileImageUrl"`
+	TenantName        string `json:"tenantName"`
+	Type              string `json:"type"`
 }
 
-func peersFromThreadID(id string) []string {
-	const unqSuffix = "@unq.gbl.spaces"
-	if strings.HasSuffix(id, unqSuffix) && strings.HasPrefix(id, "19:") {
-		body := id[len("19:") : len(id)-len(unqSuffix)]
-		parts := strings.Split(body, "_")
-		out := make([]string, 0, len(parts))
-		for _, p := range parts {
-			if strings.Count(p, "-") != 4 {
-				continue
-			}
-			out = append(out, "8:orgid:"+p)
-		}
-		return out
-	}
-	if strings.HasPrefix(id, "8:") {
-		return []string{id}
-	}
-	return nil
+type fetchShortProfileResponse struct {
+	Value         []rawUserProfile `json:"value"`
+	ResolvedUsers []rawUserProfile `json:"resolvedUsers"`
 }
 
-func classifyChat(r *rawConversation) ChatType {
-	if strings.HasSuffix(r.ID, "@thread.tacv2") {
-		return ChatTypeChannel
+const shortProfileQuery = "isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeBots=true"
+
+// Tenant is the organization-metadata subset we pull from the middle-tier.
+type Tenant struct {
+	TenantID    string `json:"tenantId"`
+	DisplayName string `json:"tenantName"`
+	IsDefault   bool   `json:"isDefault"`
+}
+
+// FetchTenants returns the tenants the current user belongs to.
+func (c *Client) FetchTenants(ctx context.Context) ([]Tenant, error) {
+	endpoint := c.mtBase + "/beta/users/tenants"
+	var raw []Tenant
+	if err := c.doJSON(ctx, "GET", endpoint, AuthBearer, nil, &raw); err != nil {
+		return nil, err
 	}
-	if strings.HasSuffix(r.ID, "@thread.v2") {
-		if strings.EqualFold(r.ThreadProperties.ChatType, "meeting") || strings.HasPrefix(r.ID, "19:meeting_") {
-			return ChatTypeMeeting
+	return raw, nil
+}
+
+// CurrentTenantName returns the display name of the organization that
+// matches c.cfg.TenantID, falling back to the first tenant in the list.
+// Empty string if the API is unavailable or reports nothing.
+func (c *Client) CurrentTenantName(ctx context.Context) string {
+	tenants, err := c.FetchTenants(ctx)
+	if err != nil {
+		c.log.Debug().Err(err).Msg("FetchTenants failed; space will fall back to generic label")
+		return ""
+	}
+	if len(tenants) == 0 {
+		c.log.Debug().Msg("FetchTenants returned empty; space will fall back to generic label")
+		return ""
+	}
+	for _, t := range tenants {
+		if t.TenantID == c.cfg.TenantID && t.DisplayName != "" {
+			return t.DisplayName
 		}
-		return ChatTypeGroup
 	}
-	if strings.HasPrefix(r.ID, "8:") {
-		return ChatType1on1
+	return tenants[0].DisplayName
+}
+
+func (c *Client) FetchShortProfiles(ctx context.Context, mris []string) ([]User, error) {
+	if len(mris) == 0 {
+		return nil, nil
 	}
-	if r.ThreadProperties.UniqueRosterThread == "true" || r.ThreadProperties.ProductThreadType == "OneToOneChat" {
-		return ChatType1on1
+	endpoint := c.mtBase + "/beta/users/fetchShortProfile?" + shortProfileQuery
+	var resp fetchShortProfileResponse
+	if err := c.doJSON(ctx, "POST", endpoint, AuthBearer, mris, &resp); err != nil {
+		return nil, err
 	}
-	return ChatTypeGroup
+	rows := resp.Value
+	if len(rows) == 0 {
+		rows = resp.ResolvedUsers
+	}
+	out := make([]User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, profileToUser(&r))
+	}
+	return out, nil
+}
+
+func (c *Client) GetUser(ctx context.Context, mri string) (*User, error) {
+	if mri == "" {
+		return nil, fmt.Errorf("empty mri")
+	}
+	users, err := c.FetchShortProfiles(ctx, []string{mri})
+	if err != nil {
+		return nil, err
+	}
+	for i := range users {
+		if strings.EqualFold(users[i].MRI, mri) || users[i].MRI == "" {
+			return &users[i], nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+
+func profileToUser(r *rawUserProfile) User {
+	return User{
+		MRI:         firstNonEmpty(r.MRI, r.ObjectID),
+		DisplayName: firstNonEmpty(r.DisplayName, joinName(r.GivenName, r.Surname), r.UserPrincipalName, r.Email),
+		Email:       firstNonEmpty(r.Email, r.UserPrincipalName),
+		JobTitle:    r.JobTitle,
+		AvatarURL:   r.ImageURL,
+	}
+}
+
+// FetchAvatar downloads a user's profile picture using browser-style cookie
+// auth (the asset endpoint rejects Authorization headers).
+func (c *Client) FetchAvatar(ctx context.Context, mri string) ([]byte, string, error) {
+	if mri == "" {
+		return nil, "", fmt.Errorf("empty mri")
+	}
+	if c.cfg.UserMRI == "" {
+		return nil, "", fmt.Errorf("client missing self mri")
+	}
+	selfOID := strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")
+	endpoint := c.mtBase + "/beta/users/" + url.PathEscape(selfOID) + "/profilepicturev2/" + mri
+	if err := c.ensureFreshTokens(ctx, true, false); err != nil {
+		return nil, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	c.tokenLock.RLock()
+	authToken := ""
+	if c.auth != nil {
+		authToken = c.auth.Value
+	}
+	c.tokenLock.RUnlock()
+	if authToken == "" {
+		return nil, "", ErrUnauthorized
+	}
+	req.Header.Set("Cookie", "authtoken=Bearer="+authToken+"&Origin=https://teams.microsoft.com")
+	req.Header.Set("Referer", "https://teams.microsoft.com/")
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, "", ErrNotFound
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, "", fmt.Errorf("avatar fetch %s: %d %s", mri, resp.StatusCode, string(body))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/jpeg"
+	}
+	return data, ct, nil
+}
+
+func joinName(first, last string) string {
+	if first == "" {
+		return last
+	}
+	if last == "" {
+		return first
+	}
+	return first + " " + last
 }
