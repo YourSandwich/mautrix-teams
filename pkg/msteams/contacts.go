@@ -18,6 +18,7 @@ package msteams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -70,6 +71,134 @@ func (c *Client) ListChats(ctx context.Context) ([]Chat, error) {
 	out := make([]Chat, 0, len(resp.Conversations))
 	for _, conv := range resp.Conversations {
 		out = append(out, convertRawConversation(&conv))
+	}
+	return out, nil
+}
+
+func (c *Client) listTeamsRequest(ctx context.Context, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.tokenLock.RLock()
+	bearer := ""
+	skype := ""
+	if c.csaAuth != nil {
+		bearer = c.csaAuth.Value
+	}
+	if c.skype != nil {
+		skype = c.skype.Value
+	}
+	c.tokenLock.RUnlock()
+	if bearer == "" || skype == "" {
+		return nil, ErrUnauthorized
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("X-Skypetoken", skype)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if resp.StatusCode == http.StatusUnauthorized {
+		c.log.Debug().Int("len", len(body)).Bytes("body", body).Msg("csa 401 body")
+		return nil, ErrTokenExpired
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("ListTeams: %d %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+type teamsRosterResponse struct {
+	Teams []rawTeam `json:"teams"`
+}
+
+type rawTeam struct {
+	ID          string           `json:"id"`
+	DisplayName string           `json:"displayName"`
+	Description string           `json:"description"`
+	PictureETag string           `json:"pictureETag"`
+	IsArchived  bool             `json:"isArchived"`
+	Channels    []rawTeamChannel `json:"channels"`
+}
+
+type rawTeamChannel struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
+	IsGeneral   bool   `json:"isGeneralChannel"`
+	IsArchived  bool   `json:"isArchived"`
+}
+
+// ListTeams returns the user's joined teams along with the channels in each.
+// The csa aggregator is regional (host comes from authz.regionGtms) and
+// expects its own AAD audience (chatsvcagg.teams.microsoft.com), so we mint
+// a second bearer via RefreshCsaToken and retry once if the cached token 401s.
+func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
+	base := c.csaBase
+	if base == "" {
+		base = "https://teams.microsoft.com/api/csa"
+	}
+	endpoint := base + "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true"
+	if IsConsumerTenant(c.cfg.TenantID) {
+		// Consumer Teams has no concept of teams/channels: there's only
+		// DMs and group chats. Short-circuit so we don't hit a 404.
+		return nil, ErrNotImplemented
+	}
+	c.tokenLock.RLock()
+	csaExp := c.csaAuth == nil || c.csaAuth.Expired()
+	c.tokenLock.RUnlock()
+	if csaExp {
+		if err := c.RefreshCsaToken(ctx); err != nil {
+			return nil, fmt.Errorf("refresh csa token for ListTeams: %w", err)
+		}
+	}
+	body, err := c.listTeamsRequest(ctx, endpoint)
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := c.RefreshCsaToken(ctx); rerr != nil {
+			if rerr2 := c.refreshAllTokens(ctx); rerr2 != nil {
+				return nil, fmt.Errorf("refresh tokens for ListTeams: %w", rerr2)
+			}
+			if rerr2 := c.RefreshCsaToken(ctx); rerr2 != nil {
+				return nil, fmt.Errorf("refresh csa token after full refresh: %w", rerr2)
+			}
+		}
+		body, err = c.listTeamsRequest(ctx, endpoint)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var raw teamsRosterResponse
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("decode teams roster: %w", err)
+	}
+	out := make([]Team, 0, len(raw.Teams))
+	for _, t := range raw.Teams {
+		if t.IsArchived {
+			continue
+		}
+		team := Team{
+			ID:          t.ID,
+			DisplayName: t.DisplayName,
+			Description: t.Description,
+			PictureETag: t.PictureETag,
+		}
+		for _, ch := range t.Channels {
+			if ch.IsArchived {
+				continue
+			}
+			team.Channels = append(team.Channels, TeamChannel{
+				ID:          ch.ID,
+				DisplayName: ch.DisplayName,
+				Description: ch.Description,
+				IsGeneral:   ch.IsGeneral,
+			})
+		}
+		out = append(out, team)
 	}
 	return out, nil
 }
