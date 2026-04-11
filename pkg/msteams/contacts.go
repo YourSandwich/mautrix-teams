@@ -16,6 +16,7 @@
 package msteams
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,6 @@ import (
 	"strings"
 )
 
-// conversationsResponse mirrors the chat service payload.
 type conversationsResponse struct {
 	Conversations []rawConversation `json:"conversations"`
 }
@@ -240,14 +240,12 @@ type fetchShortProfileResponse struct {
 
 const shortProfileQuery = "isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeBots=true"
 
-// Tenant is the organization-metadata subset we pull from the middle-tier.
 type Tenant struct {
 	TenantID    string `json:"tenantId"`
 	DisplayName string `json:"tenantName"`
 	IsDefault   bool   `json:"isDefault"`
 }
 
-// FetchTenants returns the tenants the current user belongs to.
 func (c *Client) FetchTenants(ctx context.Context) ([]Tenant, error) {
 	endpoint := c.mtBase + "/beta/users/tenants"
 	var raw []Tenant
@@ -306,14 +304,69 @@ func (c *Client) GetUser(ctx context.Context, mri string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
+	var profile *User
 	for i := range users {
 		if strings.EqualFold(users[i].MRI, mri) || users[i].MRI == "" {
-			return &users[i], nil
+			p := users[i]
+			profile = &p
+			break
 		}
+	}
+	// Enrich with substrate-cached profile (phones, dept, etc.). If we don't
+	// have one yet but know the user's email, try a one-shot substrate query
+	// so the first GetUser fills the cache for subsequent calls.
+	if cached := c.CachedUserProfile(mri); cached != nil {
+		if profile == nil {
+			return cached, nil
+		}
+		mergeUserProfile(profile, cached)
+	} else {
+		// Try the loki/delve people-card first (postal address, full phones).
+		// Fall back to substrate (search-by-email) when delve isn't available.
+		if rich, err := c.FetchPersonCard(ctx, mri); err == nil && rich != nil {
+			if profile == nil {
+				c.CacheUserProfile(rich)
+				return rich, nil
+			}
+			mergeUserProfile(profile, rich)
+			c.CacheUserProfile(profile)
+		} else if profile != nil && profile.Email != "" {
+			if hits, err := c.SearchUsers(ctx, profile.Email); err == nil {
+				for i := range hits {
+					if strings.EqualFold(hits[i].MRI, mri) {
+						mergeUserProfile(profile, &hits[i])
+						break
+					}
+				}
+			}
+		}
+	}
+	if profile != nil {
+		return profile, nil
 	}
 	return nil, ErrNotFound
 }
 
+func mergeUserProfile(dst, src *User) {
+	if dst.JobTitle == "" {
+		dst.JobTitle = src.JobTitle
+	}
+	if dst.Company == "" {
+		dst.Company = src.Company
+	}
+	if dst.Department == "" {
+		dst.Department = src.Department
+	}
+	if dst.Office == "" {
+		dst.Office = src.Office
+	}
+	if dst.Email == "" {
+		dst.Email = src.Email
+	}
+	if len(dst.Phones) == 0 {
+		dst.Phones = src.Phones
+	}
+}
 
 func profileToUser(r *rawUserProfile) User {
 	return User{
@@ -387,4 +440,408 @@ func joinName(first, last string) string {
 		return first
 	}
 	return first + " " + last
+}
+
+// SearchUsers queries the Microsoft 365 substrate "people picker" endpoint
+// that Teams' web client uses for free-form user search. It needs a token
+// scoped to outlook.office.com/search; one is minted via RefreshSearchToken.
+func (c *Client) SearchUsers(ctx context.Context, query string) ([]User, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if err := c.ensureSearchToken(ctx); err != nil {
+		return nil, err
+	}
+	reqID := newUUIDv4()
+	sessionID := newUUIDv4()
+	raw, _ := json.Marshal(substrateRequest(query, reqID))
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://substrate.office.com/search/api/v1/suggestions?scenario=powerbar",
+		bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.searchTokenValue())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-AnchorMailbox", "Oid:"+strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")+"@"+c.cfg.TenantID)
+	req.Header.Set("client-request-id", reqID)
+	req.Header.Set("clientrequestid", reqID)
+	req.Header.Set("client-session-id", sessionID)
+	req.Header.Set("x-ms-request-id", reqID)
+	req.Header.Set("x-ms-session-id", sessionID)
+	req.Header.Set("x-client-version", "T2.1")
+	req.Header.Set("Referer", "https://teams.microsoft.com/")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrTokenExpired
+	}
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("substrate search: %d %s", resp.StatusCode, string(rb))
+	}
+	users := parseSubstrateResponse(rb)
+	for i := range users {
+		c.CacheUserProfile(&users[i])
+	}
+	return users, nil
+}
+
+// FetchPersonCard hits the loki/delve people-card endpoint that powers Teams'
+// "live persona card" popout. Returns a User with phones, postal address,
+// office, manager metadata etc. Falls back to ErrNotImplemented when the
+// delve token can't be minted (e.g. consumer accounts).
+func (c *Client) FetchPersonCard(ctx context.Context, mri string) (*User, error) {
+	if mri == "" {
+		return nil, fmt.Errorf("empty mri")
+	}
+	if err := c.ensureDelveToken(ctx); err != nil {
+		return nil, err
+	}
+	hostAppPersonaID, _ := json.Marshal(map[string]any{
+		"userId":          mri,
+		"isSharedChannel": false,
+	})
+	q := url.Values{}
+	q.Set("hostAppPersonaId", string(hostAppPersonaID))
+	q.Set("teamsMri", mri)
+	base := c.delveBase
+	if base == "" {
+		base = "https://nam.loki.delve.office.com"
+	}
+	endpoint := base + "/api/v2/person?" + q.Encode()
+	body, _ := json.Marshal(map[string]any{
+		"X-ClientType":                "Teams",
+		"X-ClientFeature":             "LivePersonaCard",
+		"X-ClientArchitectureVersion": "v2",
+		"X-ClientScenario":            "PersonaInfo",
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.delveTokenValue())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrTokenExpired
+	}
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("loki person: %d %s", resp.StatusCode, string(rb))
+	}
+	return parseLokiPerson(mri, rb)
+}
+
+func (c *Client) ensureDelveToken(ctx context.Context) error {
+	c.tokenLock.RLock()
+	tok := c.delveAuth
+	c.tokenLock.RUnlock()
+	if tok != nil && !tok.Expired() {
+		return nil
+	}
+	return c.RefreshDelveToken(ctx)
+}
+
+func (c *Client) delveTokenValue() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	if c.delveAuth == nil {
+		return ""
+	}
+	return c.delveAuth.Value
+}
+
+func parseLokiPerson(mri string, data []byte) (*User, error) {
+	var out struct {
+		Person struct {
+			Names []struct {
+				Value struct {
+					DisplayName string `json:"displayName"`
+				} `json:"value"`
+			} `json:"names"`
+			Phones []struct {
+				Value struct {
+					Type   string `json:"type"`
+					Number string `json:"number"`
+				} `json:"value"`
+			} `json:"phones"`
+			EmailAddresses []struct {
+				Value struct {
+					Address string `json:"address"`
+				} `json:"value"`
+			} `json:"emailAddresses"`
+			PostalAddresses []struct {
+				Value struct {
+					Type   string `json:"type"`
+					City   string `json:"city"`
+					Street string `json:"street"`
+				} `json:"value"`
+			} `json:"postalAddresses"`
+			WorkDetails []struct {
+				Value struct {
+					CompanyName string `json:"companyName"`
+					JobTitle    string `json:"jobTitle"`
+					Department  string `json:"department"`
+					Office      string `json:"office"`
+				} `json:"value"`
+			} `json:"workDetails"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		} `json:"person"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("loki person: decode: %w", err)
+	}
+	u := &User{MRI: mri, Email: out.Person.UserPrincipalName}
+	if len(out.Person.Names) > 0 {
+		u.DisplayName = out.Person.Names[0].Value.DisplayName
+	}
+	if len(out.Person.WorkDetails) > 0 {
+		w := out.Person.WorkDetails[0].Value
+		u.Company, u.JobTitle, u.Department, u.Office = w.CompanyName, w.JobTitle, w.Department, w.Office
+	}
+	if u.Email == "" && len(out.Person.EmailAddresses) > 0 {
+		u.Email = out.Person.EmailAddresses[0].Value.Address
+	}
+	for _, p := range out.Person.Phones {
+		u.Phones = append(u.Phones, Phone{Type: p.Value.Type, Number: p.Value.Number})
+	}
+	if u.Office == "" && len(out.Person.PostalAddresses) > 0 {
+		a := out.Person.PostalAddresses[0].Value
+		if a.City != "" {
+			u.Office = a.City
+		}
+	}
+	return u, nil
+}
+
+func (c *Client) ensureSearchToken(ctx context.Context) error {
+	c.tokenLock.RLock()
+	tok := c.searchAuth
+	c.tokenLock.RUnlock()
+	if tok != nil && !tok.Expired() {
+		return nil
+	}
+	return c.RefreshSearchToken(ctx)
+}
+
+func (c *Client) searchTokenValue() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	if c.searchAuth == nil {
+		return ""
+	}
+	return c.searchAuth.Value
+}
+
+func substrateRequest(query, reqID string) map[string]any {
+	return map[string]any{
+		"EntityRequests": []any{
+			map[string]any{
+				"Query": map[string]any{
+					"QueryString":           query,
+					"DisplayQueryString":    query,
+					"NormalizedQueryString": query,
+				},
+				"EntityType": "People",
+				"Size":       10,
+				"Fields": []string{
+					"Id", "MRI", "DisplayName", "EmailAddresses", "PeopleType",
+					"PeopleSubtype", "UserPrincipalName", "GivenName", "Surname",
+					"JobTitle", "CompanyName", "Department", "Phones",
+				},
+				"Filter": map[string]any{
+					"And": []any{
+						map[string]any{"Or": []any{
+							map[string]any{"Term": map[string]string{"PeopleType": "Person"}},
+							map[string]any{"Term": map[string]string{"PeopleType": "Other"}},
+						}},
+						map[string]any{"Or": []any{
+							map[string]any{"Term": map[string]string{"PeopleSubtype": "OrganizationUser"}},
+							map[string]any{"Term": map[string]string{"PeopleSubtype": "MTOUser"}},
+							map[string]any{"Term": map[string]string{"PeopleSubtype": "PersonalContact"}},
+							map[string]any{"Term": map[string]string{"PeopleSubtype": "Guest"}},
+						}},
+						map[string]any{"Or": []any{
+							map[string]any{"Term": map[string]string{"Flags": "NonHidden"}},
+						}},
+					},
+				},
+				"Provenances": []string{"Mailbox", "Directory"},
+				"From":        0,
+			},
+		},
+		"Scenario": map[string]any{
+			"Name": "powerbar",
+			"Dimensions": []any{map[string]string{
+				"DimensionName":  "QueryType",
+				"DimensionValue": "PeopleCentricSearch",
+			}},
+		},
+		"Cvid":       reqID,
+		"LogicalId":  reqID,
+		"AppName":    "Microsoft Teams",
+		"dataSource": "personScoped",
+	}
+}
+
+func parseSubstrateResponse(data []byte) []User {
+	var out struct {
+		Groups []struct {
+			Suggestions []struct {
+				MRI               string   `json:"MRI"`
+				DisplayName       string   `json:"DisplayName"`
+				GivenName         string   `json:"GivenName"`
+				Surname           string   `json:"Surname"`
+				EmailAddresses    []string `json:"EmailAddresses"`
+				UserPrincipalName string   `json:"UserPrincipalName"`
+				JobTitle          string   `json:"JobTitle"`
+				CompanyName       string   `json:"CompanyName"`
+				Department        string   `json:"Department"`
+				Phones            []struct {
+					Number string `json:"Number"`
+					Type   string `json:"Type"`
+				} `json:"Phones"`
+			} `json:"Suggestions"`
+		} `json:"Groups"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	var users []User
+	seen := map[string]bool{}
+	for _, g := range out.Groups {
+		for _, s := range g.Suggestions {
+			if s.MRI == "" || seen[s.MRI] {
+				continue
+			}
+			seen[s.MRI] = true
+			email := s.UserPrincipalName
+			if email == "" && len(s.EmailAddresses) > 0 {
+				email = s.EmailAddresses[0]
+			}
+			phones := make([]Phone, 0, len(s.Phones))
+			for _, p := range s.Phones {
+				phones = append(phones, Phone{Type: p.Type, Number: p.Number})
+			}
+			users = append(users, User{
+				MRI:         s.MRI,
+				DisplayName: s.DisplayName,
+				Email:       email,
+				JobTitle:    s.JobTitle,
+				Company:     s.CompanyName,
+				Department:  s.Department,
+				Phones:      phones,
+			})
+		}
+	}
+	return users
+}
+
+// StartOneOnOne returns the implicit DM thread between the logged-in user
+// and target. Teams doesn't require an explicit "create" call: the thread id
+// is the two GUIDs sorted lexicographically, and Teams materialises the
+// conversation server-side on the first message we POST into it.
+func (c *Client) StartOneOnOne(ctx context.Context, targetMRI string) (*Chat, error) {
+	if targetMRI == "" {
+		return nil, fmt.Errorf("empty target MRI")
+	}
+	a := strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")
+	b := strings.TrimPrefix(targetMRI, "8:orgid:")
+	if a > b {
+		a, b = b, a
+	}
+	threadID := fmt.Sprintf("19:%s_%s@unq.gbl.spaces", a, b)
+	return &Chat{
+		ID:   threadID,
+		Type: ChatType1on1,
+		Members: []Member{
+			{MRI: c.cfg.UserMRI},
+			{MRI: targetMRI},
+		},
+	}, nil
+}
+
+func (c *Client) CreateGroupChat(ctx context.Context, topic string, members []string) (*Chat, error) {
+	return nil, ErrNotImplemented
+}
+
+func convertRawConversation(r *rawConversation) Chat {
+	c := Chat{
+		ID:    r.ID,
+		Topic: r.ThreadProperties.Topic,
+	}
+	c.Type = classifyChat(r)
+	for _, m := range r.Members {
+		mri := m.MRI
+		if mri == "" {
+			mri = m.ID
+		}
+		if mri == "" {
+			continue
+		}
+		c.Members = append(c.Members, Member{MRI: mri, Role: m.Role})
+	}
+	if r.LastMessage != nil {
+		c.LastUpdated = ParseTeamsTime(r.LastMessage.ComposeTime)
+	}
+	// /conversations omits members for 1:1 DMs - both peers are encoded in
+	// the thread id itself.
+	if len(c.Members) == 0 {
+		if peers := peersFromThreadID(r.ID); len(peers) > 0 {
+			for _, p := range peers {
+				c.Members = append(c.Members, Member{MRI: p})
+			}
+		}
+	}
+	return c
+}
+
+func peersFromThreadID(id string) []string {
+	const unqSuffix = "@unq.gbl.spaces"
+	if strings.HasSuffix(id, unqSuffix) && strings.HasPrefix(id, "19:") {
+		body := id[len("19:") : len(id)-len(unqSuffix)]
+		parts := strings.Split(body, "_")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if strings.Count(p, "-") != 4 {
+				continue
+			}
+			out = append(out, "8:orgid:"+p)
+		}
+		return out
+	}
+	if strings.HasPrefix(id, "8:") {
+		return []string{id}
+	}
+	return nil
+}
+
+func classifyChat(r *rawConversation) ChatType {
+	if strings.HasSuffix(r.ID, "@thread.tacv2") {
+		return ChatTypeChannel
+	}
+	if strings.HasSuffix(r.ID, "@thread.v2") {
+		if strings.EqualFold(r.ThreadProperties.ChatType, "meeting") || strings.HasPrefix(r.ID, "19:meeting_") {
+			return ChatTypeMeeting
+		}
+		return ChatTypeGroup
+	}
+	if strings.HasPrefix(r.ID, "8:") {
+		return ChatType1on1
+	}
+	if r.ThreadProperties.UniqueRosterThread == "true" || r.ThreadProperties.ProductThreadType == "OneToOneChat" {
+		return ChatType1on1
+	}
+	return ChatTypeGroup
 }
