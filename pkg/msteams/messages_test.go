@@ -139,7 +139,9 @@ func TestFetchHistory(t *testing.T) {
 				{"id":"1","from":"8:orgid:a","content":"hi","contenttype":"text","composetime":"1700000000000"},
 				{"id":"2","from":"8:orgid:b","content":"<p>yo</p>","contenttype":"html","composetime":"1700000000001"}
 			],
-			"_metadata.syncState": "cursor-1"
+			"_metadata": {
+				"backwardLink": "https://example/v1/users/ME/conversations/19:abc@thread.v2/messages?syncState=cursor-1&pageSize=10"
+			}
 		}`))
 	}))
 	t.Cleanup(srv.Close)
