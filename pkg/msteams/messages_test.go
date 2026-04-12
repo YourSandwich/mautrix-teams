@@ -161,3 +161,32 @@ func TestFetchHistory(t *testing.T) {
 		t.Errorf("cursor propagation failed: %+v", res)
 	}
 }
+
+func TestParseEmotionsDedup(t *testing.T) {
+	props := map[string]any{
+		"emotions": []map[string]any{
+			{
+				"key": "heart",
+				"users": []map[string]any{
+					{"mri": "8:orgid:alice", "time": int64(1000)},
+					{"mri": "8:orgid:alice", "time": int64(3000)},
+					{"mri": "8:orgid:alice", "time": int64(2000)},
+					{"mri": "8:orgid:bob", "time": int64(1500)},
+				},
+			},
+			{
+				"key":   "like",
+				"users": []map[string]any{{"mri": "8:orgid:alice", "time": int64(500)}},
+			},
+		},
+	}
+	got := parseEmotionsFromProps(props)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 deduped reactions, got %d: %+v", len(got), got)
+	}
+	for _, r := range got {
+		if r.Type == "heart" && r.UserID == "8:orgid:alice" && r.Time.UnixMilli() != 3000 {
+			t.Errorf("alice/heart should keep latest ts=3000, got %d", r.Time.UnixMilli())
+		}
+	}
+}
