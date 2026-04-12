@@ -20,6 +20,38 @@ import (
 	"testing"
 )
 
+// TestInlineEmojiNotAnAttachment locks in the fix for the real-world collision
+// where a Teams RichText/Html message with an inline ":wink:" tag was split
+// into an m.image part and an m.text part on the Matrix side, crashing the DB
+// unique constraint. The inline tag must collapse into its Unicode alt, and
+// the attachment extractor must not emit a part for it.
+func TestInlineEmojiNotAnAttachment(t *testing.T) {
+	body := `<p>Good point.&nbsp;<span title="Zwinkern" type="(wink)" class="animated-emoticon-20-wink" itemscope=""><img itemscope="" itemtype="http://schema.skype.com/Emoji" itemid="wink" src="https://statics.teams.cdn.office.net/.../wink.png" title="Zwinkern" alt="😉" style="width:20px; height:20px"></span>&nbsp;</p>`
+	if atts := ExtractAMSAttachments(body); len(atts) != 0 {
+		t.Fatalf("inline emoji leaked into attachments: %+v", atts)
+	}
+	replaced := ReplaceInlineEmojis(body)
+	if strings.Contains(replaced, "schema.skype.com/Emoji") {
+		t.Errorf("inline emoji <img> not rewritten: %q", replaced)
+	}
+	if !strings.Contains(replaced, "😉") {
+		t.Errorf("inline emoji alt (Unicode) missing from output: %q", replaced)
+	}
+}
+
+// TestStickerStillExtracted confirms the regex split didn't accidentally drop
+// real standalone image types. Stickers/Giphy/FlikMsg still become parts.
+func TestStickerStillExtracted(t *testing.T) {
+	body := `<img itemtype="http://schema.skype.com/Giphy" src="https://media.giphy.com/foo.gif" alt="giphy">`
+	atts := ExtractAMSAttachments(body)
+	if len(atts) != 1 {
+		t.Fatalf("giphy sticker dropped, got %d attachments", len(atts))
+	}
+	if !atts[0].IsImage || atts[0].URL == "" {
+		t.Errorf("giphy parsed wrong: %+v", atts[0])
+	}
+}
+
 func TestHTMLToMatrixPlain(t *testing.T) {
 	tests := []struct {
 		in, plain string
