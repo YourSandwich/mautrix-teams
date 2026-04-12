@@ -496,6 +496,19 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	// emotion change. Without skypeeditedid it's not a real edit, so emit a
 	// ReactionSync so the bridge diffs against what's stored. Empty emotions
 	// (last reaction removed) still must propagate so Matrix drops the bubble.
+	if resourceType == "MessageUpdate" && r.SkypeEditedID == "" && r.DeleteTime == "" && !deletetimeFromProps(r.Properties) {
+		c.emit(Event{
+			Type:      EventTypeReaction,
+			ThreadID:  threadID,
+			Timestamp: ParseTeamsTime(r.ComposeTime),
+			Message: &Message{
+				ID:        r.ID,
+				ThreadID:  threadID,
+				Reactions: parseEmotionsFromProps(r.Properties),
+			},
+		}, r.IMDisplayName)
+		return
+	}
 	if c.claimSent(r.ClientMessageID) {
 		return
 	}
@@ -503,7 +516,7 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	if resourceType == "MessageUpdate" || r.SkypeEditedID != "" {
 		evType = EventTypeEditMessage
 	}
-	if r.DeleteTime != "" {
+	if r.DeleteTime != "" || deletetimeFromProps(r.Properties) {
 		evType = EventTypeDeleteMessage
 	}
 	c.emit(Event{
@@ -533,6 +546,64 @@ func (c *Client) emit(ev Event, imDisplayName string) {
 	default:
 		c.log.Warn().Str("type", string(ev.Type)).Msg("Trouter event channel full; dropping")
 	}
+}
+
+// parseEmotionsFromProps flattens properties.emotions into per-user reactions.
+func parseEmotionsFromProps(props map[string]any) []Reaction {
+	raw, ok := props["emotions"]
+	if !ok || raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var entries []struct {
+		Key   string `json:"key"`
+		Users []struct {
+			MRI   string `json:"mri"`
+			Time  int64  `json:"time"`
+			Value any    `json:"value"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil
+	}
+	var out []Reaction
+	for _, e := range entries {
+		for _, u := range e.Users {
+			out = append(out, Reaction{
+				Type:   e.Key,
+				UserID: u.MRI,
+				Time:   time.UnixMilli(u.Time),
+			})
+		}
+	}
+	return out
+}
+
+// deletetimeFromProps returns true when Teams' properties blob flags the
+// message as deleted (key can be "deletetime" or "deletionTime" depending
+// on message schema vintage).
+func deletetimeFromProps(props map[string]any) bool {
+	if len(props) == 0 {
+		return false
+	}
+	for _, k := range []string{"deletetime", "deletionTime", "deletiontime"} {
+		if v, ok := props[k]; ok {
+			switch t := v.(type) {
+			case string:
+				if t != "" && t != "null" {
+					return true
+				}
+			case float64:
+				if t > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func teamsThreadFromURL(u string) string {
