@@ -344,6 +344,7 @@ func extractSyncStateCursor(link string) string {
 func isChatMessage(messageType string) bool {
 	switch messageType {
 	case "", "Text", "RichText", "RichText/Html",
+		"RichText/UriObject",
 		"RichText/Media_GenericFile", "RichText/Media_Card", "RichText/Media_FlikMsg",
 		"Event/Call", "RichText/Media_Call",
 		"ThreadActivity/CallStarted", "ThreadActivity/CallEnded",
@@ -600,7 +601,9 @@ func convertRawMessage(r *rawMessage, threadID string) Message {
 		Content:     r.Content,
 		ContentType: r.ContentType,
 		Created:     ParseTeamsTime(r.ComposeTime),
+		ParentID:    parentMessageIDFromURL(r.ConversationID),
 		Mentions:    parsePropertiesMentions(r.Properties),
+		Reactions:   parseEmotionsFromProps(r.Properties),
 		SharedFiles: parsePropertiesFiles(r.Properties),
 		Properties:  r.Properties,
 	}
