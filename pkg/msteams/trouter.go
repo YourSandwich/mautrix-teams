@@ -45,7 +45,6 @@ const (
 	trouterTCCV            = "2024.23.01.2"
 )
 
-// trouterInfo is the JSON body returned by POST /v4/a.
 type trouterInfo struct {
 	SocketIO      string            `json:"socketio"`
 	SURL          string            `json:"surl"`
@@ -178,8 +177,6 @@ func (c *Client) trouterDial(ctx context.Context, info *trouterInfo, sessionID, 
 	return conn, nil
 }
 
-// trouterCommonQuery builds the shared query string used both for the GET
-// session call and the WebSocket upgrade URL.
 func trouterCommonQuery(info *trouterInfo, endpoint string, conNum uint64) url.Values {
 	q := url.Values{}
 	q.Set("v", "v4")
@@ -238,8 +235,6 @@ func (c *Client) runTrouter(conn *websocket.Conn, info *trouterInfo, endpoint st
 	}
 }
 
-// trouterSession1 runs one connected lifetime: it reads frames until the
-// server closes the socket or the context is cancelled.
 func (c *Client) trouterSession1(conn *websocket.Conn, info *trouterInfo, endpoint string) error {
 	ctx, cancel := context.WithCancel(c.stopCtx)
 	defer cancel()
@@ -421,9 +416,78 @@ func (c *Client) dispatchTrouterRequest(reqURL string, body []byte) {
 			return
 		}
 		c.handleEventMessage(env.ResourceType, env.Resource)
+	case strings.Contains(reqURL, "/callAgent/"):
+		c.handleCallAgentFrame(reqURL, body)
 	default:
 		c.log.Debug().Str("url", reqURL).Int("len", len(body)).Msg("Trouter: unhandled endpoint")
 	}
+}
+
+// handleCallAgentFrame turns a raw Trouter callAgent frame into an
+// EventTypeCall so the connector can post a notice into the right portal.
+// Frame URL pattern: ".../callAgent/<callId>/<userMri>/conversation/<event>".
+// Body shape varies by event; we parse the few fields we need (state +
+// conversation id + initiator) and log the raw payload for diagnostics.
+func (c *Client) handleCallAgentFrame(reqURL string, body []byte) {
+	c.log.Info().Str("url", reqURL).Bytes("body", body).Msg("Trouter callAgent frame")
+	var env struct {
+		ConversationID  string `json:"conversationId"`
+		ConversationURL string `json:"conversationUrl"`
+		CallID          string `json:"callId"`
+		State           string `json:"state"`
+		Initiator       struct {
+			MRI string `json:"id"`
+		} `json:"initiator"`
+		Caller struct {
+			MRI string `json:"id"`
+		} `json:"caller"`
+		Subject string `json:"subject"`
+		JoinURL string `json:"joinUrl"`
+	}
+	_ = json.Unmarshal(body, &env)
+	threadID := env.ConversationID
+	if threadID == "" {
+		threadID = teamsThreadFromURL(env.ConversationURL)
+	}
+	if threadID == "" {
+		// Path: ".../callAgent/<callId>/<userMri>/conversation/<thread>/..."
+		if i := strings.Index(reqURL, "/conversation/"); i >= 0 {
+			tail := reqURL[i+len("/conversation/"):]
+			if j := strings.Index(tail, "/"); j >= 0 {
+				threadID = tail[:j]
+			} else {
+				threadID = tail
+			}
+		}
+	}
+	if threadID == "" {
+		return
+	}
+	from := env.Initiator.MRI
+	if from == "" {
+		from = env.Caller.MRI
+	}
+	verb := "RichText/Media_Call"
+	if strings.Contains(strings.ToLower(env.State), "end") {
+		verb = "ThreadActivity/CallEnded"
+	}
+	id := env.CallID
+	if id == "" {
+		id = FormatTeamsTime(time.Now())
+	}
+	c.emit(Event{
+		Type:      EventTypeCall,
+		ThreadID:  threadID,
+		Timestamp: time.Now(),
+		Message: &Message{
+			ID:          id,
+			ThreadID:    threadID,
+			From:        from,
+			MessageType: verb,
+			Content:     env.JoinURL + " " + env.Subject,
+			Created:     time.Now(),
+		},
+	}, "")
 }
 
 // trouterMessageResource is the JSON shape of the chat-service message embedded
@@ -548,7 +612,6 @@ func (c *Client) emit(ev Event, imDisplayName string) {
 	}
 }
 
-// parseEmotionsFromProps flattens properties.emotions into per-user reactions.
 func parseEmotionsFromProps(props map[string]any) []Reaction {
 	raw, ok := props["emotions"]
 	if !ok || raw == nil {
@@ -685,7 +748,6 @@ func (c *Client) trouterSendSequential(ctx context.Context, conn *websocket.Conn
 	return conn.Write(ctx, websocket.MessageText, []byte(frame))
 }
 
-// trouterSendEphemeral sends a "5:::{payload}" frame (no ack expected).
 func (c *Client) trouterSendEphemeral(ctx context.Context, conn *websocket.Conn, payload string) error {
 	return conn.Write(ctx, websocket.MessageText, []byte("5:::"+payload))
 }
