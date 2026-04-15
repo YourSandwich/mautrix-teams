@@ -1,16 +1,49 @@
-# Displayname template for Teams users.
+# Displayname template for Teams users. Available variables:
+#  .MRI         - The Teams user MRI (e.g. 8:orgid:<guid>)
+#  .DisplayName - The name the user has set in Teams
+#  .Email       - The email address of the user
+#  .JobTitle    - The user's job title (if set)
 displayname_template: '{{or .DisplayName .Email .MRI}}'
 
-# Chat name template for Teams chats.
+# Chat name template for Teams chats. Available variables:
+#  .ID    - The Teams thread ID
+#  .Type  - One of oneOnOne, group, channel, meeting
+#  .Topic - The chat topic
 chat_name_template: '{{if .Topic}}{{.Topic}}{{else}}Teams chat{{end}}'
 
 # Mute chat portals by default.
 mute_chats_by_default: false
 
-# Which Teams thread classes to enumerate on startup.
-sync_channels:        true
-sync_system_threads:  false
+# When Teams deletes a message, redact the Matrix counterpart by default. Set
+# this to true to instead replace the content with "(deleted)" and keep the
+# event in the room. Matrix→Teams deletions are always permanent.
+mark_deleted_as_edit: false
 
+# Which Teams thread classes to enumerate on startup. Threads excluded here
+# can still surface on demand if a Trouter message arrives in them.
+sync_channels:        true   # Team channels (19:...@thread.tacv2)
+sync_meeting_chats:   true   # Calendar-driven meeting chats (19:meeting_...) - grouped under a "Meetings" sub-space
+sync_system_threads:  false  # 48:notes / 48:notifications / 48:calllogs
+
+# Options for backfilling message history from Teams.
 backfill:
+    # Number of conversations to fetch when syncing on startup.
     conversation_count: 20
+    # Enable message backfill at all.
     enabled: true
+
+# Which presence-like signals Matrix should push up into Teams. Incoming
+# (Teams -> Matrix) typing and read receipts are always forwarded; these flags
+# only gate the outbound direction. Omit or leave true for the default
+# bidirectional behaviour.
+presence:
+    send_matrix_typing: true
+    send_matrix_read_receipts: true
+
+# Override Teams API endpoints. Leave empty to use the commercial-cloud defaults.
+endpoints:
+    chat_svc: ""
+    auth_svc: ""
+    mt: ""
+    trouter: ""
+    ams: ""
