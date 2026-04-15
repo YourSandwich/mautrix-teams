@@ -1,0 +1,16 @@
+# Displayname template for Teams users.
+displayname_template: '{{or .DisplayName .Email .MRI}}'
+
+# Chat name template for Teams chats.
+chat_name_template: '{{if .Topic}}{{.Topic}}{{else}}Teams chat{{end}}'
+
+# Mute chat portals by default.
+mute_chats_by_default: false
+
+# Which Teams thread classes to enumerate on startup.
+sync_channels:        true
+sync_system_threads:  false
+
+backfill:
+    conversation_count: 20
+    enabled: true
