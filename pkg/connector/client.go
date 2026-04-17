@@ -20,9 +20,11 @@ import (
 	"fmt"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
+	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
@@ -37,7 +39,6 @@ func init() {
 	})
 }
 
-// TeamsClient implements bridgev2.NetworkAPI for one Microsoft Teams session.
 type TeamsClient struct {
 	Main      *TeamsConnector
 	UserLogin *bridgev2.UserLogin
@@ -48,8 +49,9 @@ type TeamsClient struct {
 }
 
 var (
-	_ bridgev2.NetworkAPI      = (*TeamsClient)(nil)
-	_ status.BridgeStateFiller = (*TeamsClient)(nil)
+	_ bridgev2.NetworkAPI                             = (*TeamsClient)(nil)
+	_ status.BridgeStateFiller                        = (*TeamsClient)(nil)
+	_ bridgev2.PersonalFilteringCustomizingNetworkAPI = (*TeamsClient)(nil)
 )
 
 func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
@@ -61,6 +63,9 @@ func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		AuthToken:    meta.AuthToken,
 		RefreshToken: meta.RefreshToken,
 		Logger:       login.Log,
+	}
+	if meta.ChatSvcBase != "" {
+		cfg.Endpoints.ChatSvcBase = meta.ChatSvcBase
 	}
 	client, err := msteams.NewClient(cfg)
 	if err != nil {
@@ -97,6 +102,7 @@ func (t *TeamsClient) Connect(ctx context.Context) {
 	t.stopPump = cancel
 	go t.eventLoop(loopCtx)
 	t.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+	go t.syncChats(loopCtx)
 }
 
 func (t *TeamsClient) persistTokens(ctx context.Context) {
@@ -118,6 +124,18 @@ func (t *TeamsClient) persistTokens(ctx context.Context) {
 	if refresh != "" && meta.RefreshToken != refresh {
 		meta.RefreshToken = refresh
 		dirty = true
+	}
+	if chatSvc := t.Client.ChatSvcBase(); chatSvc != "" && meta.ChatSvcBase != chatSvc {
+		meta.ChatSvcBase = chatSvc
+		dirty = true
+	}
+	// Pull the organisation name once per session so the personal space can
+	// label itself with the tenant the user is actually logged into.
+	if meta.TenantName == "" {
+		if name := t.Client.CurrentTenantName(ctx); name != "" {
+			meta.TenantName = name
+			dirty = true
+		}
 	}
 	if dirty {
 		if err := t.UserLogin.Save(ctx); err != nil {
@@ -150,6 +168,34 @@ func (t *TeamsClient) LogoutRemote(ctx context.Context) {
 
 func (t *TeamsClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
 	return teamsid.ParseUserID(userID) == t.UserMRI
+}
+
+func (t *TeamsClient) CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom) {
+	name := "Microsoft Teams"
+	topic := "Your Microsoft Teams bridged chats"
+	if meta, ok := t.UserLogin.Metadata.(*UserLoginMetadata); ok && meta.TenantName != "" {
+		name = meta.TenantName
+		topic = fmt.Sprintf("%s (Microsoft Teams)", meta.TenantName)
+	}
+	req.Name = name
+	req.Topic = topic
+	// Force the teams logo onto the space avatar. The framework only pulls
+	// NetworkIcon at room-create time; if the icon upload hadn't finished by
+	// then we'd have no avatar at all. Refresh it here just in case.
+	if icon := t.Main.currentNetworkIcon(); icon != "" {
+		for _, ev := range req.InitialState {
+			if ev.Type == event.StateRoomAvatar {
+				if c, ok := ev.Content.Parsed.(*event.RoomAvatarEventContent); ok {
+					c.URL = icon
+					return
+				}
+			}
+		}
+		req.InitialState = append(req.InitialState, &event.Event{
+			Type:    event.StateRoomAvatar,
+			Content: event.Content{Parsed: &event.RoomAvatarEventContent{URL: icon}},
+		})
+	}
 }
 
 func (t *TeamsClient) FillBridgeState(state status.BridgeState) status.BridgeState {
