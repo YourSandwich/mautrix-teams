@@ -21,7 +21,10 @@ import (
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
+	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
@@ -38,7 +41,12 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 		log.Err(err).Msg("Failed to list chats")
 		return
 	}
+	teams := t.fetchTeams(ctx)
+	channelToTeam := indexChannelTeams(teams)
+	t.queueTeamSpaces(ctx, teams)
 	cfg := t.Main.Config
+	t.queueMeetingsSpace(ctx, chats, cfg)
+	t.prefetchProfiles(ctx, chats)
 	queued := 0
 	skipped := map[string]int{}
 	for i := range chats {
@@ -53,8 +61,26 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 			Str("topic", chat.Topic).
 			Int("members", len(chat.Members)).
 			Msg("Queueing chat resync")
+		if chat.Type == msteams.ChatTypeChannel {
+			if teamID, ok := channelToTeam[chat.ID]; ok && chat.TeamID == "" {
+				chat.TeamID = teamID
+			}
+			if chat.TeamID != "" && chat.Topic == "" {
+				if name := channelDisplayName(teams, chat.TeamID, chat.ID); name != "" {
+					chat.Topic = name
+				}
+			}
+		}
 		portalKey := teamsid.MakePortalKey(chat.ID, t.UserLogin.ID, t.splitPortals())
 		info := t.wrapChatInfo(ctx, &chat)
+		switch {
+		case chat.Type == msteams.ChatTypeChannel && chat.TeamID != "":
+			parent := teamsid.MakeTeamPortalID(chat.TeamID)
+			info.ParentID = &parent
+		case chat.Type == msteams.ChatTypeMeeting && cfg.ShouldSyncMeetingChats():
+			parent := teamsid.MeetingsPortalID
+			info.ParentID = &parent
+		}
 		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
 			EventMeta: simplevent.EventMeta{
 				Type:         bridgev2.RemoteEventChatResync,
@@ -65,7 +91,7 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 				},
 			},
 			ChatInfo:        info,
-			LatestMessageTS: chat.LastUpdated,
+			LatestMessageTS: chat.LastUpdated, // non-zero unblocks the framework's backfill gate
 		})
 		queued++
 	}
@@ -76,9 +102,147 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 		Msg("Synced chats from Teams")
 }
 
+func (t *TeamsClient) fetchTeams(ctx context.Context) []msteams.Team {
+	teams, err := t.Client.ListTeams(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("ListTeams failed; channels will not be grouped under team sub-spaces")
+		return nil
+	}
+	return teams
+}
+
+func indexChannelTeams(teams []msteams.Team) map[string]string {
+	idx := map[string]string{}
+	for _, team := range teams {
+		for _, ch := range team.Channels {
+			if ch.ID != "" {
+				idx[ch.ID] = team.ID
+			}
+		}
+	}
+	return idx
+}
+
+func channelDisplayName(teams []msteams.Team, teamID, channelID string) string {
+	for _, team := range teams {
+		if team.ID != teamID {
+			continue
+		}
+		for _, ch := range team.Channels {
+			if ch.ID == channelID {
+				return ch.DisplayName
+			}
+		}
+	}
+	return ""
+}
+
+// queueMeetingsSpace creates the shared "Meetings" parent so 19:meeting_*@thread.v2
+// portals nest under it instead of cluttering the main teams space.
+func (t *TeamsClient) queueMeetingsSpace(ctx context.Context, chats []msteams.Chat, cfg Config) {
+	if !cfg.ShouldSyncMeetingChats() {
+		return
+	}
+	hasMeeting := false
+	for i := range chats {
+		if chats[i].Type == msteams.ChatTypeMeeting {
+			hasMeeting = true
+			break
+		}
+	}
+	if !hasMeeting {
+		return
+	}
+	roomType := database.RoomTypeSpace
+	name := "Meetings"
+	selfID := teamsid.MakeUserID(t.UserMRI)
+	info := &bridgev2.ChatInfo{
+		Name: &name,
+		Type: &roomType,
+		Members: &bridgev2.ChatMemberList{
+			IsFull: false,
+			MemberMap: map[networkid.UserID]bridgev2.ChatMember{
+				selfID: {
+					EventSender: bridgev2.EventSender{IsFromMe: true, Sender: selfID},
+					Membership:  event.MembershipJoin,
+				},
+			},
+		},
+	}
+	t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:         bridgev2.RemoteEventChatResync,
+			PortalKey:    teamsid.MakeMeetingsPortalKey(t.UserLogin.ID, t.splitPortals()),
+			CreatePortal: true,
+			LogContext: func(c zerolog.Context) zerolog.Context {
+				return c.Str("kind", "meetings-space")
+			},
+		},
+		ChatInfo: info,
+	})
+}
+
+func (t *TeamsClient) queueTeamSpaces(ctx context.Context, teams []msteams.Team) {
+	if !t.Main.Config.SyncChannels {
+		return
+	}
+	for _, team := range teams {
+		if team.ID == "" || len(team.Channels) == 0 {
+			continue
+		}
+		key := teamsid.MakeTeamPortalKey(team.ID, t.UserLogin.ID, t.splitPortals())
+		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:         bridgev2.RemoteEventChatResync,
+				PortalKey:    key,
+				CreatePortal: true,
+				LogContext: func(c zerolog.Context) zerolog.Context {
+					return c.Str("teams_team", team.ID).Str("kind", "team-space")
+				},
+			},
+			ChatInfo: t.wrapTeamInfo(&team),
+		})
+	}
+}
+
+func (t *TeamsClient) prefetchProfiles(ctx context.Context, chats []msteams.Chat) {
+	seen := map[string]struct{}{}
+	mris := make([]string, 0, len(chats)*2)
+	for i := range chats {
+		for _, m := range chats[i].Members {
+			if m.MRI == "" || m.MRI == t.UserMRI {
+				continue
+			}
+			if _, ok := seen[m.MRI]; ok {
+				continue
+			}
+			seen[m.MRI] = struct{}{}
+			mris = append(mris, m.MRI)
+		}
+	}
+	if len(mris) == 0 {
+		return
+	}
+	users, err := t.Client.FetchShortProfiles(ctx, mris)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Int("count", len(mris)).Msg("Profile prefetch failed")
+		return
+	}
+	for _, u := range users {
+		t.Client.CacheDisplayName(u.MRI, u.DisplayName)
+	}
+	zerolog.Ctx(ctx).Debug().Int("requested", len(mris)).Int("got", len(users)).Msg("Prefetched profiles")
+}
+
+// skipReasonFor returns "" if the chat should be synced at startup, else a
+// short tag for telemetry. Skipped chats still materialise on demand when
+// they receive a Trouter message.
 func (t *TeamsClient) skipReasonFor(chat *msteams.Chat, cfg Config) string {
 	if !cfg.SyncChannels && chat.Type == msteams.ChatTypeChannel {
 		return "channel"
+	}
+	if !cfg.ShouldSyncMeetingChats() && chat.Type == msteams.ChatTypeMeeting {
+		return "meeting"
 	}
 	if !cfg.SyncSystemThreads && systemThreadName(chat.ID) != "" {
 		return "system_thread"
