@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v26.04)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            goarch: amd64
+            pacman_arch: x86_64
+          - runs-on: ubuntu-24.04-arm
+            goarch: arm64
+            pacman_arch: aarch64
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Install static build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libolm-dev libolm3 ffmpeg
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [ -n "${{ github.event.inputs.tag }}" ] && TAG="${{ github.event.inputs.tag }}"
+          COMMIT="$(git rev-parse HEAD)"
+          BUILDTIME="$(date -Iseconds)"
+          MAUTRIX_VERSION="$(grep 'maunium.net/go/mautrix ' go.mod | awk '{print $2}' | head -n1)"
+          LDFLAGS="-s -w -X main.Tag=${TAG} -X main.Commit=${COMMIT} -X 'main.BuildTime=${BUILDTIME}' -X 'maunium.net/go/mautrix.GoModVersion=${MAUTRIX_VERSION}'"
+          go build -trimpath -ldflags="${LDFLAGS}" -o mautrix-teams ./cmd/mautrix-teams
+          ./mautrix-teams --version || true
+
+      - name: Assemble tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [ -n "${{ github.event.inputs.tag }}" ] && TAG="${{ github.event.inputs.tag }}"
+          DIR="mautrix-teams-${TAG}-linux-${{ matrix.goarch }}"
+          mkdir "${DIR}"
+          cp mautrix-teams LICENSE LICENSE.exceptions README.md CHANGELOG.md ROADMAP.md "${DIR}/"
+          cp pkg/connector/example-config.yaml "${DIR}/example-config.yaml"
+          tar czf "${DIR}.tar.gz" "${DIR}"
+          sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goarch }}
+          path: |
+            mautrix-teams-*.tar.gz
+            mautrix-teams-*.tar.gz.sha256
+
+  archpkg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            pacman_arch: x86_64
+          - runs-on: ubuntu-24.04-arm
+            pacman_arch: aarch64
+    runs-on: ${{ matrix.runs-on }}
+    container:
+      image: archlinux:base-devel
+      options: --user root
+    steps:
+      - name: Install deps
+        run: |
+          pacman -Syu --noconfirm --needed git go libolm ffmpeg python sudo
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up non-root builder
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          chown -R builder:builder .
+
+      - name: Prepare release PKGBUILD
+        working-directory: packaging/arch
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [ -n "${{ github.event.inputs.tag }}" ] && TAG="${{ github.event.inputs.tag }}"
+          VER="${TAG#v}"
+          cp PKGBUILD-git PKGBUILD.release
+          sed -i "s|^pkgver=.*|pkgver=${VER}|" PKGBUILD.release
+          sed -i 's|^pkgname=${_pkgname}-git$|pkgname=${_pkgname}|' PKGBUILD.release
+          sed -i '/^provides=/d; /^conflicts=/d' PKGBUILD.release
+          python3 - <<'PY'
+          import re
+          p = 'PKGBUILD.release'
+          src = open(p).read()
+          src = re.sub(r'\npkgver\(\)\s*\{.*?\n\}\n', '\n', src, flags=re.DOTALL)
+          open(p, 'w').write(src)
+          PY
+          chown builder:builder PKGBUILD.release
+
+      - name: Build arch package
+        working-directory: packaging/arch
+        run: |
+          sudo -u builder -E env GOCACHE=/tmp/go-cache GOPATH=/tmp/go-path \
+            makepkg -p PKGBUILD.release -f --noconfirm --skipinteg
+          sha256sum *.pkg.tar.zst > pkg.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archpkg-${{ matrix.pacman_arch }}
+          path: |
+            packaging/arch/*.pkg.tar.zst
+            packaging/arch/pkg.sha256
+
+  release:
+    needs: [binary, archpkg]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p flat
+          find dist -type f \( -name '*.tar.gz' -o -name '*.pkg.tar.zst' -o -name '*.sha256' \) -exec cp {} flat/ \;
+          ls -la flat/
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [ -n "${{ github.event.inputs.tag }}" ] && TAG="${{ github.event.inputs.tag }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: flat/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
