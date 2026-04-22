@@ -1,0 +1,67 @@
+# Maintainer: Sandwich <sandwich@archworks.co>
+# VCS-build variant: builds from the git worktree this PKGBUILD lives in.
+# Run `makepkg -si` from the repository root.
+_pkgname=mautrix-teams
+pkgname=${_pkgname}-git
+pkgver=0.1.0.r0.unknown
+pkgrel=1
+pkgdesc="A Matrix-Microsoft Teams puppeting bridge (built from local git tree)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Sandwich/mautrix-teams"
+license=('AGPL-3.0-or-later')
+depends=('glibc' 'ffmpeg')
+makedepends=('go' 'git')
+optdepends=('olm: end-to-end encryption support')
+backup=('etc/mautrix-teams/mautrix-teams.yaml'
+        'etc/mautrix-teams/registration.yaml')
+install=mautrix-teams.install
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+source=()
+sha256sums=()
+options=(!lto)
+
+pkgver() {
+  cd "$startdir/../.."
+  local count sha
+  count=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+  sha=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+  printf "0.1.0.r%s.%s" "$count" "$sha"
+}
+
+build() {
+  cd "$startdir/../.."
+  export CGO_CPPFLAGS="${CPPFLAGS}"
+  export CGO_CFLAGS="${CFLAGS}"
+  export CGO_CXXFLAGS="${CXXFLAGS}"
+  export CGO_LDFLAGS="${LDFLAGS}"
+  export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
+  export GOCACHE="$srcdir/go-cache"
+  export GOPATH="$srcdir/go-path"
+  ./build.sh -o "$srcdir/mautrix-teams"
+}
+
+check() {
+  cd "$startdir/../.."
+  export GOCACHE="$srcdir/go-cache"
+  export GOPATH="$srcdir/go-path"
+  # Explicit package list; `./...` would descend into packaging/arch/pkg
+  # which makepkg creates as a mode-700 staging dir and Go can't scan.
+  go test ./cmd/... ./pkg/...
+}
+
+package() {
+  local root
+  root=$(realpath "$startdir/../..")
+  install -Dm755 "$srcdir/mautrix-teams" "$pkgdir/usr/bin/mautrix-teams"
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$root/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$root/ROADMAP.md" "$pkgdir/usr/share/doc/$pkgname/ROADMAP.md"
+  install -Dm644 "$root/CHANGELOG.md" "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+
+  install -Dm644 "$startdir/mautrix-teams.service" "$pkgdir/usr/lib/systemd/system/mautrix-teams.service"
+  install -Dm644 "$startdir/mautrix-teams.sysusers" "$pkgdir/usr/lib/sysusers.d/mautrix-teams.conf"
+  install -Dm644 "$startdir/mautrix-teams.tmpfiles" "$pkgdir/usr/lib/tmpfiles.d/mautrix-teams.conf"
+
+  install -dm755 "$pkgdir/etc/mautrix-teams"
+}
