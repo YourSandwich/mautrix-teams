@@ -8,6 +8,14 @@ the Teams web app receives, so it works with a normal personal, work, or
 school account and does **not** require an Azure app registration, tenant
 admin consent, or a paid Microsoft Communication Services SDK.
 
+## Maintenance
+
+Looking for a new maintainer. I don't plan to keep running this long term.
+Ideal outcome is a transfer into the [mautrix](https://github.com/mautrix)
+org as `mautrix/teams`. Otherwise happy to hand the repo to any capable
+maintainer willing to take it over fully. Open an issue if you're
+interested.
+
 ## Status
 
 Functional. Most day-to-day chat features round-trip in both directions; calls
