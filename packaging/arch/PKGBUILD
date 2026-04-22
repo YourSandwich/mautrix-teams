@@ -1,14 +1,14 @@
 # Maintainer: Sandwich <sandwich@archworks.co>
 pkgname=mautrix-teams
 pkgver=26.04
-pkgrel=1
+pkgrel=2
 pkgdesc="A Matrix-Microsoft Teams puppeting bridge"
 arch=('x86_64' 'aarch64')
 url="https://github.com/YourSandwich/mautrix-teams"
 license=('AGPL-3.0-or-later')
-depends=('glibc' 'ffmpeg')
+depends=('libolm')
 makedepends=('go' 'git')
-optdepends=('olm: end-to-end encryption support')
+optdepends=('ffmpeg: voice message and video transcoding')
 backup=('etc/mautrix-teams/mautrix-teams.yaml'
         'etc/mautrix-teams/registration.yaml')
 install=mautrix-teams.install
