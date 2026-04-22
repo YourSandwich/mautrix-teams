@@ -1,6 +1,6 @@
 # Maintainer: Sandwich <sandwich@archworks.co>
 pkgname=mautrix-teams
-pkgver=0.1.0
+pkgver=26.04
 pkgrel=1
 pkgdesc="A Matrix-Microsoft Teams puppeting bridge"
 arch=('x86_64' 'aarch64')
@@ -45,6 +45,7 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 build/mautrix-teams "$pkgdir/usr/bin/mautrix-teams"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 LICENSE.exceptions "$pkgdir/usr/share/licenses/$pkgname/LICENSE.exceptions"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 ROADMAP.md "$pkgdir/usr/share/doc/$pkgname/ROADMAP.md"
   install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
