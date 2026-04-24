@@ -6,6 +6,33 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [26.04.1] - 2026-04-24
+
+### Fixed
+
+- Backfill on Synapse now respects `max_initial_messages` instead of stopping
+  at one Teams page. The internal pagination loop also counts only
+  bridgeable messages toward the target so non-chat events don't shrink it.
+- Multi-part messages (text + attachment, etc.) get distinct part IDs so
+  they no longer collide on bridgev2's `(message_id, part_id)` UNIQUE
+  constraint, which was aborting forward backfill mid-stream.
+- Inline Teams emoticons (`:wink:` etc.) render as Unicode in the message
+  body instead of being split out as standalone `m.image` parts.
+- Messages that convert to nothing (empty HTML shells, system events) are
+  skipped via `bridgev2.ErrIgnoringRemoteEvent` instead of being posted as
+  blank `m.text` placeholders.
+- History messages now populate `parent_id` (thread reply target) and
+  `reactions` from `properties.emotions` and `conversationLink`.
+- Reactions are deduped by (key, MRI) when parsing emotions so Teams's
+  per-emoji history (multiple add/remove cycles) doesn't replay as
+  duplicate Matrix reaction events.
+- `RichText/UriObject` (inline images and screenshots) is now treated as
+  a chat message type and bridged.
+- DM portal invites carry `is_direct: true` so Element auto-marks them as
+  direct chats without requiring double-puppeting.
+
+## [26.04] - 2026-04-22
+
 ### Added
 
 - Initial project scaffold on the mautrix-go `bridgev2` framework.
