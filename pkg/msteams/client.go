@@ -119,6 +119,10 @@ type Client struct {
 	// doesn't bounce back to Matrix as a duplicate.
 	sentMessagesLock sync.Mutex
 	sentMessages     map[string]struct{}
+
+	// NGC and SkypeSpacesWeb both fire per incoming call (NGC twice).
+	recentRingMu sync.Mutex
+	recentRing   map[string]time.Time
 }
 
 func (c *Client) MarkSent(clientMessageID string) {

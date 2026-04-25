@@ -90,6 +90,25 @@ type Message struct {
 	Reactions   []Reaction   `json:"reactions,omitempty"`
 	Mentions    []Mention    `json:"mentions,omitempty"`
 	SharedFiles []SharedFile `json:"shared_files,omitempty"`
+
+	CallLog *CallLog `json:"-"`
+}
+
+type CallLog struct {
+	CallID         string
+	Direction      string // "incoming" | "outgoing"
+	State          string // "accepted" | "missed" | "declined" | "cancelled" | ...
+	Type           string // "twoParty" | (group)
+	StartTime      time.Time
+	ConnectTime    time.Time
+	EndTime        time.Time
+	OriginatorMRI  string
+	OriginatorName string
+	OriginatorType string // "default", "voicemail", ...
+	TargetMRI      string
+	TargetName     string
+	TargetType     string
+	GroupThreadID  string // set for group calls
 }
 
 type Attachment struct {

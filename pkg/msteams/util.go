@@ -58,6 +58,24 @@ func SplitMRI(mri string) (prefix, id string) {
 	return mri[:idx], mri[idx+1:]
 }
 
+// DM1on1ThreadID returns the unq.gbl.spaces thread for a 1:1 between two AAD
+// users: "19:<sortedGUIDA>_<sortedGUIDB>@unq.gbl.spaces". Returns "" for any
+// non-orgid MRI (consumer, phone, bot).
+func DM1on1ThreadID(mriA, mriB string) string {
+	const orgidPrefix = "8:orgid:"
+	if !strings.HasPrefix(mriA, orgidPrefix) || !strings.HasPrefix(mriB, orgidPrefix) {
+		return ""
+	}
+	a, b := mriA[len(orgidPrefix):], mriB[len(orgidPrefix):]
+	if a == "" || b == "" {
+		return ""
+	}
+	if a > b {
+		a, b = b, a
+	}
+	return "19:" + a + "_" + b + "@unq.gbl.spaces"
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {

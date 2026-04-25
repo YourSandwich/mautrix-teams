@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -159,6 +160,66 @@ func TestFetchHistory(t *testing.T) {
 	}
 	if !res.HasMore || res.Next != "cursor-1" {
 		t.Errorf("cursor propagation failed: %+v", res)
+	}
+}
+
+func TestParseCallLogIncoming1on1(t *testing.T) {
+	props := map[string]any{
+		"call-log": `{"startTime":"2026-04-24T19:24:10.84Z","connectTime":"2026-04-24T19:24:12.35Z","endTime":"2026-04-24T19:24:30.80Z","callDirection":"incoming","callType":"twoParty","callState":"accepted","originator":"8:orgid:alice","target":"8:orgid:me","originatorParticipant":{"id":"8:orgid:alice","type":"default","displayName":"Alice"},"targetParticipant":{"id":"8:orgid:me","type":"default","displayName":"Me"},"callId":"abc","threadId":null}`,
+	}
+	cl := ParseCallLog(props)
+	if cl == nil {
+		t.Fatal("ParseCallLog returned nil")
+	}
+	if cl.Direction != "incoming" || cl.State != "accepted" {
+		t.Errorf("direction/state wrong: %+v", cl)
+	}
+	if cl.OriginatorMRI != "8:orgid:alice" || cl.TargetMRI != "8:orgid:me" {
+		t.Errorf("MRIs wrong: %+v", cl)
+	}
+	if cl.OriginatorName != "Alice" {
+		t.Errorf("originator name = %q, want Alice", cl.OriginatorName)
+	}
+	if got, want := cl.PortalThreadID("8:orgid:me"), "19:alice_me@unq.gbl.spaces"; got != want {
+		t.Errorf("incoming 1:1 should route to spaces thread; got %q want %q", got, want)
+	}
+	if d := cl.EndTime.Sub(cl.ConnectTime); d != 18450*time.Millisecond {
+		t.Errorf("duration wrong: %v", d)
+	}
+}
+
+func TestParseCallLogSelfCallSkipped(t *testing.T) {
+	props := map[string]any{
+		"call-log": `{"callDirection":"outgoing","callType":"twoParty","callState":"accepted","originator":"8:orgid:me","target":"8:orgid:me","targetParticipant":{"type":"voicemail"}}`,
+	}
+	cl := ParseCallLog(props)
+	if cl == nil {
+		t.Fatal("ParseCallLog returned nil")
+	}
+	if got := cl.PortalThreadID("8:orgid:me"); got != "" {
+		t.Errorf("self-call/voicemail should skip, got portal %q", got)
+	}
+}
+
+func TestParseCallLogGroupCall(t *testing.T) {
+	props := map[string]any{
+		"call-log": `{"callDirection":"outgoing","callType":"group","callState":"accepted","originator":"8:orgid:me","threadId":"19:abc@thread.v2"}`,
+	}
+	cl := ParseCallLog(props)
+	if got := cl.PortalThreadID("8:orgid:me"); got != "19:abc@thread.v2" {
+		t.Errorf("group call should route to thread, got %q", got)
+	}
+}
+
+func TestParseCallLogMissingOrInvalid(t *testing.T) {
+	if ParseCallLog(nil) != nil {
+		t.Error("nil props should return nil")
+	}
+	if ParseCallLog(map[string]any{"call-log": ""}) != nil {
+		t.Error("empty string should return nil")
+	}
+	if ParseCallLog(map[string]any{"call-log": "not json"}) != nil {
+		t.Error("invalid json should return nil")
 	}
 }
 
