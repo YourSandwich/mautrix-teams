@@ -256,16 +256,35 @@ func (c *Client) RefreshSharePointToken(ctx context.Context, host string) error 
 	return nil
 }
 
-// RefreshSkypeToken mints a chat-service skype token. Empty cfg.TenantID picks
-// the personal endpoint since work/school accounts always carry a tenant GUID.
+// RefreshSkypeToken mints a chat-service skype token via the authz endpoint.
+// Authz needs a live bearer; refresh it proactively when expired and once
+// reactively on 401 (Azure can revoke a bearer before its stored expiry).
 func (c *Client) RefreshSkypeToken(ctx context.Context) error {
+	c.tokenLock.RLock()
+	authExpired := c.auth == nil || c.auth.Expired()
+	c.tokenLock.RUnlock()
+	if authExpired {
+		if err := c.RefreshAuthToken(ctx); err != nil {
+			return fmt.Errorf("refresh prerequisite oauth bearer: %w", err)
+		}
+	}
+	err := c.requestSkypeToken(ctx)
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := c.RefreshAuthToken(ctx); rerr != nil {
+			return fmt.Errorf("recover bearer after authz 401: %w", rerr)
+		}
+		err = c.requestSkypeToken(ctx)
+	}
+	return err
+}
+
+func (c *Client) requestSkypeToken(ctx context.Context) error {
 	c.tokenLock.RLock()
 	auth := c.auth
 	c.tokenLock.RUnlock()
 	if auth == nil || auth.Value == "" {
 		return ErrUnauthorized
 	}
-
 	endpoint := c.authzURLForTest
 	if endpoint == "" {
 		endpoint = workAuthzURL
