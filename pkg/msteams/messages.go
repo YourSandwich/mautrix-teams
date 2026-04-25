@@ -341,6 +341,75 @@ func extractSyncStateCursor(link string) string {
 	return u.Query().Get("syncState")
 }
 
+func ParseCallLog(props map[string]any) *CallLog {
+	raw, ok := props["call-log"].(string)
+	if !ok || raw == "" {
+		return nil
+	}
+	var p struct {
+		CallID         string `json:"callId"`
+		Direction      string `json:"callDirection"`
+		State          string `json:"callState"`
+		Type           string `json:"callType"`
+		StartTime      string `json:"startTime"`
+		ConnectTime    string `json:"connectTime"`
+		EndTime        string `json:"endTime"`
+		Originator     string `json:"originator"`
+		Target         string `json:"target"`
+		ThreadID       string `json:"threadId"`
+		OriginatorPart struct {
+			Type        string `json:"type"`
+			DisplayName string `json:"displayName"`
+		} `json:"originatorParticipant"`
+		TargetPart struct {
+			Type        string `json:"type"`
+			DisplayName string `json:"displayName"`
+		} `json:"targetParticipant"`
+	}
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil
+	}
+	cl := &CallLog{
+		CallID:         p.CallID,
+		Direction:      p.Direction,
+		State:          p.State,
+		Type:           p.Type,
+		OriginatorMRI:  p.Originator,
+		OriginatorName: p.OriginatorPart.DisplayName,
+		OriginatorType: p.OriginatorPart.Type,
+		TargetMRI:      p.Target,
+		TargetName:     p.TargetPart.DisplayName,
+		TargetType:     p.TargetPart.Type,
+		GroupThreadID:  p.ThreadID,
+	}
+	cl.StartTime, _ = time.Parse(time.RFC3339Nano, p.StartTime)
+	cl.ConnectTime, _ = time.Parse(time.RFC3339Nano, p.ConnectTime)
+	cl.EndTime, _ = time.Parse(time.RFC3339Nano, p.EndTime)
+	return cl
+}
+
+// PortalThreadID returns the real conversation thread for the call. 1:1 maps
+// to the unq.gbl.spaces thread - Teams rejects the bare partner MRI with 400.
+func (cl *CallLog) PortalThreadID(selfMRI string) string {
+	if cl == nil {
+		return ""
+	}
+	if cl.GroupThreadID != "" {
+		return cl.GroupThreadID
+	}
+	other := cl.TargetMRI
+	if cl.Direction == "incoming" {
+		other = cl.OriginatorMRI
+	}
+	if other == "" || other == selfMRI {
+		return ""
+	}
+	if cl.TargetType == "voicemail" || cl.OriginatorType == "voicemail" {
+		return ""
+	}
+	return DM1on1ThreadID(selfMRI, other)
+}
+
 func isChatMessage(messageType string) bool {
 	switch messageType {
 	case "", "Text", "RichText", "RichText/Html",

@@ -416,11 +416,127 @@ func (c *Client) dispatchTrouterRequest(reqURL string, body []byte) {
 			return
 		}
 		c.handleEventMessage(env.ResourceType, env.Resource)
-	case strings.Contains(reqURL, "/callAgent/"):
+	case strings.Contains(reqURL, "/NGCallManagerWin"),
+		strings.Contains(reqURL, "/SkypeSpacesWeb"):
+		c.handleRingFrame(body)
+	case strings.Contains(reqURL, "/callAgent"):
 		c.handleCallAgentFrame(reqURL, body)
 	default:
 		c.log.Debug().Str("url", reqURL).Int("len", len(body)).Msg("Trouter: unhandled endpoint")
 	}
+}
+
+// handleRingFrame decodes a live ring payload. NGCallManagerWin gzips+base64s
+// the JSON in "cp"; SkypeSpacesWeb base64s the same JSON in "gp".
+func (c *Client) handleRingFrame(body []byte) {
+	var outer struct {
+		GP string `json:"gp"`
+		CP string `json:"cp"`
+	}
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return
+	}
+	var decoded []byte
+	var err error
+	switch {
+	case outer.GP != "":
+		decoded, err = base64.StdEncoding.DecodeString(outer.GP)
+	case outer.CP != "":
+		decoded, err = gunzipBase64(outer.CP)
+	default:
+		return
+	}
+	if err != nil {
+		return
+	}
+	var inv struct {
+		CallNotification struct {
+			From struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"displayName"`
+			} `json:"from"`
+			To struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"displayName"`
+			} `json:"to"`
+		} `json:"callNotification"`
+		ConversationInvitation struct {
+			IsMultiParty bool `json:"isMultiParty"`
+			IsBroadcast  bool `json:"isBroadcast"`
+		} `json:"conversationInvitation"`
+		DebugContent struct {
+			CallID string `json:"callId"`
+		} `json:"debugContent"`
+	}
+	if err := json.Unmarshal(decoded, &inv); err != nil {
+		return
+	}
+	self := c.UserMRI()
+	from := inv.CallNotification.From.ID
+	if from == "" || from == self {
+		return
+	}
+	if inv.ConversationInvitation.IsMultiParty || inv.ConversationInvitation.IsBroadcast {
+		return
+	}
+	threadID := DM1on1ThreadID(self, from)
+	if threadID == "" {
+		return
+	}
+	if !c.shouldEmitRing(inv.DebugContent.CallID) {
+		return
+	}
+	now := time.Now()
+	cl := &CallLog{
+		CallID:         inv.DebugContent.CallID,
+		Direction:      "incoming",
+		State:          "ringing",
+		Type:           "twoParty",
+		OriginatorMRI:  from,
+		OriginatorName: inv.CallNotification.From.DisplayName,
+		TargetMRI:      inv.CallNotification.To.ID,
+		TargetName:     inv.CallNotification.To.DisplayName,
+		StartTime:      now,
+	}
+	id := cl.CallID
+	if id == "" {
+		id = FormatTeamsTime(now)
+	}
+	c.emit(Event{
+		Type:      EventTypeCall,
+		ThreadID:  threadID,
+		Timestamp: now,
+		Message: &Message{
+			ID:          id,
+			ThreadID:    threadID,
+			From:        from,
+			MessageType: "ring",
+			Created:     now,
+			CallLog:     cl,
+		},
+	}, inv.CallNotification.From.DisplayName)
+}
+
+func (c *Client) shouldEmitRing(callID string) bool {
+	if callID == "" {
+		return true
+	}
+	c.recentRingMu.Lock()
+	defer c.recentRingMu.Unlock()
+	if c.recentRing == nil {
+		c.recentRing = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for k, t := range c.recentRing {
+		if now.Sub(t) > 5*time.Minute {
+			delete(c.recentRing, k)
+		}
+	}
+	if last, ok := c.recentRing[callID]; ok && now.Sub(last) < 5*time.Minute {
+		return false
+	}
+	c.recentRing[callID] = now
+	return true
 }
 
 // handleCallAgentFrame turns a raw Trouter callAgent frame into an
@@ -525,6 +641,10 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 		c.log.Debug().Str("conv", r.ConversationLink).Str("from", r.From).Msg("Trouter: unparseable thread/from")
 		return
 	}
+	if isCallLogThread(threadID) {
+		c.handleCallLogMessage(r)
+		return
+	}
 	switch r.MessageType {
 	case "Control/Typing":
 		c.emit(Event{Type: EventTypeTyping, ThreadID: threadID, TypingFrom: fromMRI, Timestamp: time.Now()}, r.IMDisplayName)
@@ -599,6 +719,51 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 			ParentID:    parentID,
 		},
 	}, r.IMDisplayName)
+}
+
+// 48:calllogs / 48:notifications are virtual threads (/v1/threads returns 400);
+// their payloads are re-routed to the real conversation portal.
+func isCallLogThread(threadID string) bool {
+	return threadID == "48:calllogs" || threadID == "48:notifications"
+}
+
+func (c *Client) handleCallLogMessage(r trouterMessageResource) {
+	cl := ParseCallLog(r.Properties)
+	if cl == nil {
+		return
+	}
+	self := c.UserMRI()
+	threadID := cl.PortalThreadID(self)
+	if threadID == "" {
+		return
+	}
+	if cl.OriginatorName == "" {
+		cl.OriginatorName = c.CachedDisplayName(cl.OriginatorMRI)
+	}
+	if cl.TargetName == "" {
+		cl.TargetName = c.CachedDisplayName(cl.TargetMRI)
+	}
+	from := cl.OriginatorMRI
+	if from == "" {
+		from = self
+	}
+	ts := cl.EndTime
+	if ts.IsZero() {
+		ts = ParseTeamsTime(r.ComposeTime)
+	}
+	c.emit(Event{
+		Type:      EventTypeCall,
+		ThreadID:  threadID,
+		Timestamp: ts,
+		Message: &Message{
+			ID:          r.ID,
+			ThreadID:    threadID,
+			From:        from,
+			MessageType: "call-log",
+			Created:     ts,
+			CallLog:     cl,
+		},
+	}, "")
 }
 
 func (c *Client) emit(ev Event, imDisplayName string) {
