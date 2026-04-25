@@ -199,6 +199,9 @@ func isCallMessageType(t string) bool {
 }
 
 func formatCallNotice(msg *msteams.Message) (string, string) {
+	if msg.CallLog != nil {
+		return formatCallLogNotice(msg.CallLog)
+	}
 	verb := "Call started"
 	switch msg.MessageType {
 	case "ThreadActivity/CallEnded":
@@ -217,6 +220,64 @@ func formatCallNotice(msg *msteams.Message) (string, string) {
 			fmt.Sprintf(`📞 %s - <a href=%q>Join in Teams</a>`, verb, join)
 	}
 	return "📞 " + verb, ""
+}
+
+func formatCallLogNotice(cl *msteams.CallLog) (string, string) {
+	outgoing := strings.EqualFold(cl.Direction, "outgoing")
+	otherName, otherMRI := cl.OriginatorName, cl.OriginatorMRI
+	if outgoing {
+		otherName, otherMRI = cl.TargetName, cl.TargetMRI
+	}
+	if otherName == "" {
+		otherName = stripMRIPrefix(otherMRI)
+	}
+	icon, verb, prep := callVerb(cl.State, outgoing)
+	detail := ""
+	if d := callDuration(cl); d != "" {
+		detail = " · " + d
+	}
+	plain := fmt.Sprintf("%s %s %s %s%s", icon, verb, prep, otherName, detail)
+	htmlBody := fmt.Sprintf("%s <b>%s</b> %s %s%s", icon, verb, prep, html.EscapeString(otherName), detail)
+	return plain, htmlBody
+}
+
+func callVerb(state string, outgoing bool) (icon, verb, prep string) {
+	switch strings.ToLower(state) {
+	case "ringing":
+		return "📲", "Incoming call", "from"
+	case "missed":
+		return "📵", "Missed call", "from"
+	case "declined":
+		return "🚫", "Declined call", "from"
+	case "cancelled", "canceled":
+		return "✖️", "Cancelled call", "to"
+	}
+	if outgoing {
+		return "📞", "Outgoing call", "to"
+	}
+	return "📲", "Incoming call", "from"
+}
+
+func callDuration(cl *msteams.CallLog) string {
+	if cl.ConnectTime.IsZero() || cl.EndTime.IsZero() || !cl.EndTime.After(cl.ConnectTime) {
+		return ""
+	}
+	d := cl.EndTime.Sub(cl.ConnectTime).Round(time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+}
+
+func stripMRIPrefix(mri string) string {
+	if strings.HasPrefix(mri, "8:orgid:") {
+		return mri[len("8:orgid:"):]
+	}
+	return mri
 }
 
 var (
@@ -322,13 +383,14 @@ func (t *TeamsClient) convertIncomingMessage(
 	intent bridgev2.MatrixAPI,
 	data *msteams.Message,
 ) (*bridgev2.ConvertedMessage, error) {
-	if isCallMessageType(data.MessageType) {
-		plain, html := formatCallNotice(data)
+	if isCallMessageType(data.MessageType) || data.CallLog != nil {
+		plain, htmlBody := formatCallNotice(data)
 		content := &event.MessageEventContent{MsgType: event.MsgNotice, Body: plain}
-		if html != "" && html != plain {
+		if htmlBody != "" && htmlBody != plain {
 			content.Format = event.FormatHTML
-			content.FormattedBody = html
+			content.FormattedBody = htmlBody
 		}
+		content.Mentions = &event.Mentions{UserIDs: []id.UserID{t.UserLogin.UserMXID}}
 		return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
 			Type:    event.EventMessage,
 			Content: content,
