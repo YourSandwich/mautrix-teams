@@ -6,6 +6,31 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [26.04.2] - 2026-04-25
+
+### Added
+
+- Incoming Teams calls now post a live `📲 Incoming call from <name>` notice
+  in the caller's DM portal within ~1s of the ring, with a self-mention so
+  Element fires a Matrix push notification.
+- Post-call summaries from the `48:calllogs` system thread are parsed and
+  re-routed to the real conversation portal (DM partner for 1:1, thread for
+  group calls) instead of opening a virtual `48:calllogs` portal that the
+  Teams API rejects with HTTP 400.
+- Call notices include direction, caller display name (with cache fallback
+  for outgoing calls where Teams omits `targetParticipant.displayName`), and
+  call duration when available. Self-calls and voicemail legs are skipped.
+
+### Fixed
+
+- Bot avatar is no longer re-uploaded on every restart. The mxc cache file
+  now lives in the bridge working directory (writable under the systemd
+  unit's `ReadWritePaths`) so `PrivateTmp=yes` no longer wipes it on boot.
+- `RefreshSkypeToken` now refreshes the OAuth bearer first when the cached
+  one has expired, and retries once on a 401 from the authz endpoint. This
+  was masking expired-bearer cases as `msteams: token expired` and stalling
+  read receipts and outbound Matrix events between full reconnect cycles.
+
 ## [26.04.1] - 2026-04-24
 
 ### Fixed
