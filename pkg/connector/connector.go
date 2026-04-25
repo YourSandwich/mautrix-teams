@@ -88,15 +88,18 @@ func (tc *TeamsConnector) currentNetworkIcon() id.ContentURIString {
 	return ""
 }
 
-// iconCacheFile pins the uploaded Teams logo mxc URI to disk so restarts reuse
-// the same mxc and don't spam "avatar changed" events in every bridged room.
+// iconCacheFile pins the uploaded mxc URI so restarts don't re-upload the
+// avatar. CWD survives the systemd unit's PrivateTmp; UserCacheDir doesn't.
 func (tc *TeamsConnector) iconCacheFile() string {
-	dir, err := os.UserCacheDir()
-	if err != nil || dir == "" {
-		dir = os.TempDir()
-	}
 	sum := sha256.Sum256(teamsLogoPNG)
-	return filepath.Join(dir, "mautrix-teams.icon."+hex.EncodeToString(sum[:6]))
+	name := "mautrix-teams.icon." + hex.EncodeToString(sum[:6])
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		return filepath.Join(cwd, name)
+	}
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, name)
+	}
+	return filepath.Join(os.TempDir(), name)
 }
 
 func (tc *TeamsConnector) uploadNetworkIcon(ctx context.Context) {
