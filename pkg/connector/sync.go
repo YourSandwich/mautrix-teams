@@ -72,6 +72,10 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 			}
 		}
 		portalKey := teamsid.MakePortalKey(chat.ID, t.UserLogin.ID, t.splitPortals())
+		if t.userLeftPortal(ctx, portalKey) {
+			skipped["user_left_portal"]++
+			continue
+		}
 		info := t.wrapChatInfo(ctx, &chat)
 		switch {
 		case chat.Type == msteams.ChatTypeChannel && chat.TeamID != "":
@@ -232,6 +236,28 @@ func (t *TeamsClient) prefetchProfiles(ctx context.Context, chats []msteams.Chat
 		t.Client.CacheDisplayName(u.MRI, u.DisplayName)
 	}
 	zerolog.Ctx(ctx).Debug().Int("requested", len(mris)).Int("got", len(users)).Msg("Prefetched profiles")
+}
+
+// bridgev2 doesn't track intentional leaves; without this check it re-invites
+// on every restart.
+func (t *TeamsClient) userLeftPortal(ctx context.Context, key networkid.PortalKey) bool {
+	portal, err := t.Main.br.GetExistingPortalByKey(ctx, key)
+	if err != nil || portal == nil || portal.MXID == "" {
+		return false
+	}
+	stater, ok := t.Main.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
+	if !ok {
+		return false
+	}
+	state, err := stater.GetStateEvent(ctx, portal.MXID, event.StateMember, string(t.UserLogin.UserMXID))
+	if err != nil || state == nil {
+		return false
+	}
+	content, ok := state.Content.Parsed.(*event.MemberEventContent)
+	if !ok {
+		return false
+	}
+	return content.Membership == event.MembershipLeave || content.Membership == event.MembershipBan
 }
 
 // skipReasonFor returns "" if the chat should be synced at startup, else a
