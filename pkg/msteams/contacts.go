@@ -34,14 +34,19 @@ type conversationsResponse struct {
 type rawConversation struct {
 	ID               string          `json:"id"`
 	ThreadProperties rawThreadProps  `json:"threadProperties"`
+	Properties       rawThreadProps  `json:"properties"`
 	Members          []rawMember     `json:"members"`
 	LastMessage      *rawMessageStub `json:"lastMessage"`
 	Type             string          `json:"type"` // "Thread" for groups, missing for 1:1
 }
 
+// Mirrored under "threadProperties" by /conversations and "properties" by
+// /threads/<id>; meeting subject is JSON-in-JSON under "meeting".
 type rawThreadProps struct {
 	Topic              string `json:"topic"`
 	ChatType           string `json:"chatType"` // meeting, group, or empty
+	ThreadType         string `json:"threadType"`
+	Meeting            string `json:"meeting"`
 	UniqueRosterThread string `json:"uniquerosterthread"`
 	ProductThreadType  string `json:"productThreadType"`
 }
@@ -779,7 +784,7 @@ func (c *Client) CreateGroupChat(ctx context.Context, topic string, members []st
 func convertRawConversation(r *rawConversation) Chat {
 	c := Chat{
 		ID:    r.ID,
-		Topic: r.ThreadProperties.Topic,
+		Topic: firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meetingSubject(&r.Properties), meetingSubject(&r.ThreadProperties)),
 	}
 	c.Type = classifyChat(r)
 	for _, m := range r.Members {
@@ -827,12 +832,29 @@ func peersFromThreadID(id string) []string {
 	return nil
 }
 
+func isMeeting(p *rawThreadProps) bool {
+	return strings.EqualFold(p.ChatType, "meeting") || strings.EqualFold(p.ThreadType, "meeting")
+}
+
+func meetingSubject(p *rawThreadProps) string {
+	if p == nil || p.Meeting == "" {
+		return ""
+	}
+	var m struct {
+		Subject string `json:"subject"`
+	}
+	if json.Unmarshal([]byte(p.Meeting), &m) != nil {
+		return ""
+	}
+	return m.Subject
+}
+
 func classifyChat(r *rawConversation) ChatType {
 	if strings.HasSuffix(r.ID, "@thread.tacv2") {
 		return ChatTypeChannel
 	}
 	if strings.HasSuffix(r.ID, "@thread.v2") {
-		if strings.EqualFold(r.ThreadProperties.ChatType, "meeting") || strings.HasPrefix(r.ID, "19:meeting_") {
+		if isMeeting(&r.ThreadProperties) || isMeeting(&r.Properties) || strings.HasPrefix(r.ID, "19:meeting_") {
 			return ChatTypeMeeting
 		}
 		return ChatTypeGroup
