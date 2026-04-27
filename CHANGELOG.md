@@ -6,6 +6,33 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [27.0] - 2026-04-27
+
+Versioning now tracks the underlying mautrix-go release; `27.0` rides on
+mautrix-go `v0.27.0`.
+
+### Fixed
+
+- Group, channel and meeting portals now pick up their Teams topic. The
+  per-thread `/v1/threads/<id>` API returns thread metadata under the
+  top-level `properties` key, while `/conversations` (used at startup) uses
+  `threadProperties`; we now read either, and fall back to the calendar
+  subject parsed from `properties.meeting` JSON for meeting threads where
+  neither topic is set. Existing nameless portals get backfilled on the
+  next chat-info refresh.
+- Trouter `/v4/a` registration refreshes the skype token on a 401 and
+  retries once. Without this the bridge would enter a 5-second reconnect
+  loop after Microsoft rotated the websocket and the cached skype token
+  expired during the gap, hammering the auth endpoint until manual restart.
+- Startup chat sync no longer re-invites you to portals you have manually
+  left in Matrix. The bridge now checks the room's member state via the
+  homeserver and skips the resync when your membership is `leave` or `ban`.
+  Live messages still trigger re-invite, as before.
+- Unknown Teams contacts (no profile available, no cached display name) now
+  show as the bare AAD GUID instead of the full `8:orgid:<guid>` MRI string,
+  and DM rooms with such contacts get the same fallback so Element no longer
+  renders the room with the raw MRI as title.
+
 ## [26.04.2] - 2026-04-25
 
 ### Added
