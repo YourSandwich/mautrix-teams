@@ -32,7 +32,7 @@ var m = mxmain.BridgeMain{
 	Name:        "mautrix-teams",
 	Description: "A Matrix-Microsoft Teams puppeting bridge",
 	URL:         "https://github.com/YourSandwich/mautrix-teams",
-	Version:     "26.04",
+	Version:     "27.0",
 	Connector:   c,
 }
 

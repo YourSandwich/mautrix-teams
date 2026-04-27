@@ -3,7 +3,7 @@
 # Run `makepkg -si` from the repository root.
 _pkgname=mautrix-teams
 pkgname=${_pkgname}-git
-pkgver=26.04.r0.unknown
+pkgver=27.0.r0.unknown
 pkgrel=2
 pkgdesc="A Matrix-Microsoft Teams puppeting bridge (built from local git tree)"
 arch=('x86_64' 'aarch64')
@@ -26,7 +26,7 @@ pkgver() {
   local count sha
   count=$(git rev-list --count HEAD 2>/dev/null || echo 0)
   sha=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
-  printf "26.04.r%s.%s" "$count" "$sha"
+  printf "27.0.r%s.%s" "$count" "$sha"
 }
 
 build() {
