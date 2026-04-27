@@ -161,9 +161,16 @@ func (t *TeamsClient) wrapChatInfo(ctx context.Context, chat *msteams.Chat) *bri
 				info.Avatar = av
 			}
 			if peer, err := t.Client.GetUser(ctx, m.MRI); err == nil && peer != nil {
+				if info.Name == nil && peer.DisplayName != "" {
+					info.Name = ptr.Ptr(peer.DisplayName)
+					t.Client.CacheDisplayName(m.MRI, peer.DisplayName)
+				}
 				if topic := dmTopicFor(peer); topic != "" {
 					info.Topic = ptr.Ptr(topic)
 				}
+			}
+			if info.Name == nil {
+				info.Name = bridgev2.DefaultChatName
 			}
 			break
 		}
@@ -209,7 +216,7 @@ func (t *TeamsClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*
 	if user == nil {
 		name := t.Client.CachedDisplayName(mri)
 		if name == "" {
-			name = mri
+			name = stripMRIPrefix(mri)
 		}
 		info.Name = ptr.Ptr(name)
 	} else {
