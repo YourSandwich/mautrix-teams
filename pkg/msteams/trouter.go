@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,6 +89,17 @@ func (c *Client) trouterEndpointID() string {
 }
 
 func (c *Client) trouterRegister(ctx context.Context, endpoint string) (*trouterInfo, error) {
+	info, err := c.trouterRegisterOnce(ctx, endpoint)
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := c.RefreshSkypeToken(ctx); rerr != nil {
+			return nil, fmt.Errorf("refresh skype for trouter: %w", rerr)
+		}
+		info, err = c.trouterRegisterOnce(ctx, endpoint)
+	}
+	return info, err
+}
+
+func (c *Client) trouterRegisterOnce(ctx context.Context, endpoint string) (*trouterInfo, error) {
 	skype := c.skypeTokenValue()
 	if skype == "" {
 		return nil, ErrUnauthorized
