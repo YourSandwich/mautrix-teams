@@ -1,0 +1,78 @@
+name: Publish AUR package
+
+# Pushes packaging/arch/ to the mautrix-teams AUR repository on every release
+# tag, so the AUR package never needs a manual update. Can also be run
+# manually for an out-of-band republish.
+#
+# Triggers on the tag push rather than release:published: our GitHub Release is
+# created by the Release workflow using GITHUB_TOKEN, and events from that token
+# do not start new workflow runs. The tag archive the PKGBUILD builds from
+# exists as soon as the tag is pushed, so this can run independently.
+#
+# Required repository secrets:
+#   AUR_SSH_PRIVATE_KEY  Private SSH key whose public half is registered on the
+#                        AUR account that maintains the mautrix-teams package.
+#   AUR_COMMIT_EMAIL     Email for the AUR git commit identity.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (no v prefix, e.g. 28.0)'
+        required: true
+
+concurrency:
+  # Serialize publishes so back-to-back releases can't race two pushes against
+  # the AUR repo.
+  group: publish-aur
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish-aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing AUR package for version $VERSION"
+
+      - name: Stamp version into PKGBUILD
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/" packaging/arch/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        with:
+          pkgname: mautrix-teams
+          pkgbuild: packaging/arch/PKGBUILD
+          assets: |
+            packaging/arch/mautrix-teams.install
+            packaging/arch/mautrix-teams.service
+            packaging/arch/mautrix-teams.sysusers
+            packaging/arch/mautrix-teams.tmpfiles
+          commit_username: YourSandwich
+          commit_email: ${{ secrets.AUR_COMMIT_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.version.outputs.version }}"
+          # Recompute sha256sums from the live tag tarball + bundled assets; the
+          # committed PKGBUILD ships SKIP placeholders.
+          updpkgsums: true
+          # Validate the PKGBUILD parses and sources download, but skip the Go
+          # build (libolm + several minutes of CI per release).
+          test: true
+          test_flags: --clean --cleanbuild --nodeps --nobuild
