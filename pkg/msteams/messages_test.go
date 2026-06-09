@@ -251,3 +251,59 @@ func TestParseEmotionsDedup(t *testing.T) {
 		}
 	}
 }
+
+func TestHasEmotionsProp(t *testing.T) {
+	// The emotions key being present (even empty or null) marks a reaction
+	// update; its absence marks a content edit that must not be swallowed as
+	// reaction-only.
+	if !hasEmotionsProp(map[string]any{"emotions": []any{}}) {
+		t.Error("empty emotions array should count as present")
+	}
+	if !hasEmotionsProp(map[string]any{"emotions": nil}) {
+		t.Error("null emotions value still counts as the key being present")
+	}
+	if hasEmotionsProp(map[string]any{"content": "edited"}) {
+		t.Error("a content edit with no emotions key must not look like a reaction update")
+	}
+	if hasEmotionsProp(nil) {
+		t.Error("nil props has no emotions key")
+	}
+}
+
+func TestParsePropertiesMentionsPreservesIndex(t *testing.T) {
+	// A non-person entry (empty mri) must stay as a placeholder so later
+	// span itemids still resolve to the right person instead of shifting up.
+	props := map[string]any{
+		"mentions": `[{"mri":""},{"mri":"8:orgid:alice"},{"mri":"8:orgid:bob"}]`,
+	}
+	got := parsePropertiesMentions(props)
+	want := []string{"", "8:orgid:alice", "8:orgid:bob"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d mentions, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].UserID != w {
+			t.Errorf("index %d: got %q want %q", i, got[i].UserID, w)
+		}
+	}
+}
+
+func TestTeamsReactionKeyEncoding(t *testing.T) {
+	// Dedup relies on TeamsReactionKey being idempotent on an already-encoded
+	// key, so the stored EmojiID round-trips through AddReaction and removal.
+	cases := []struct{ in, want string }{
+		{"❤️", "heart"},
+		{"heart", "heart"}, // already-encoded key passes through unchanged
+		{"👍", "like"},
+		{"like", "like"},
+		{"not-an-emoji", "not-an-emoji"}, // unknown input is left as-is
+	}
+	for _, c := range cases {
+		if got := TeamsReactionKey(c.in); got != c.want {
+			t.Errorf("TeamsReactionKey(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := DecodeReactionKey(TeamsReactionKey("👍")); got != "👍" {
+		t.Errorf("glyph did not survive key round-trip: got %q", got)
+	}
+}

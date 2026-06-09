@@ -334,6 +334,7 @@ func (c *Client) requestSkypeToken(ctx context.Context) error {
 // response. If the operator pinned an endpoint in ClientConfig.Endpoints we
 // never overwrite it.
 func (c *Client) applyAuthzEndpoints(resp authzResponse) {
+	c.tokenLock.Lock()
 	if chat := resp.RegionGtms["chatService"]; chat != "" && c.cfg.Endpoints.ChatSvcBase == "" {
 		c.chatSvcBase = chat
 	}
@@ -356,17 +357,19 @@ func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 	// Loki/Delve people-card service is hosted in three GEO partitions
 	// (nam/eur/apc); pick the right prefix from the user's data residency.
 	c.delveBase = "https://" + lokiPrefixFor(resp) + ".loki.delve.office.com"
+	chatSvc, mt, csa, ams, delve := c.chatSvcBase, c.mtBase, c.csaBase, c.amsBase, c.delveBase
+	c.tokenLock.Unlock()
 	c.log.Debug().
 		Str("region", resp.Region).
 		Str("user_region", resp.UserRegion).
 		Str("partition", resp.Partition).
 		Str("user_partition", resp.UserPartition).
 		Interface("region_gtms", resp.RegionGtms).
-		Str("chat_svc", c.chatSvcBase).
-		Str("mt", c.mtBase).
-		Str("csa", c.csaBase).
-		Str("ams", c.amsBase).
-		Str("delve", c.delveBase).
+		Str("chat_svc", chatSvc).
+		Str("mt", mt).
+		Str("csa", csa).
+		Str("ams", ams).
+		Str("delve", delve).
 		Msg("Applied authz endpoints")
 }
 
@@ -570,8 +573,38 @@ func ParseIDToken(idToken string) (*IDTokenClaims, error) {
 	return &c, nil
 }
 
-func (c *Client) ChatSvcBase() string {
+func (c *Client) ChatSvcBase() string { return c.chatSvcBaseURL() }
+
+// The endpoint fields are rewritten on a region failover while request builders
+// read them from other goroutines, so reads go through these RLock accessors.
+func (c *Client) chatSvcBaseURL() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
 	return c.chatSvcBase
+}
+
+func (c *Client) mtBaseURL() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	return c.mtBase
+}
+
+func (c *Client) csaBaseURL() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	return c.csaBase
+}
+
+func (c *Client) amsBaseURL() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	return c.amsBase
+}
+
+func (c *Client) delveBaseURL() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	return c.delveBase
 }
 
 // ensureFreshTokens refreshes expired tokens before an authenticated request

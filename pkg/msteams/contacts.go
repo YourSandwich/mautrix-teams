@@ -63,7 +63,7 @@ type rawMessageStub struct {
 }
 
 func (c *Client) ListChats(ctx context.Context) ([]Chat, error) {
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations"
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations"
 	params := url.Values{}
 	params.Set("startTime", "0")
 	params.Set("pageSize", "100")
@@ -144,7 +144,7 @@ type rawTeamChannel struct {
 // expects its own AAD audience (chatsvcagg.teams.microsoft.com), so we mint
 // a second bearer via RefreshCsaToken and retry once if the cached token 401s.
 func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
-	base := c.csaBase
+	base := c.csaBaseURL()
 	if base == "" {
 		base = "https://teams.microsoft.com/api/csa"
 	}
@@ -212,7 +212,7 @@ func (c *Client) GetChat(ctx context.Context, threadID string) (*Chat, error) {
 	if threadID == "" {
 		return nil, fmt.Errorf("empty thread id")
 	}
-	endpoint := c.chatSvcBase + "/v1/threads/" + url.PathEscape(threadID) + "?view=msnp24Equivalent"
+	endpoint := c.chatSvcBaseURL() + "/v1/threads/" + url.PathEscape(threadID) + "?view=msnp24Equivalent"
 	var resp rawConversation
 	if err := c.doJSON(ctx, "GET", endpoint, AuthSkype, nil, &resp); err != nil {
 		return nil, err
@@ -252,7 +252,7 @@ type Tenant struct {
 }
 
 func (c *Client) FetchTenants(ctx context.Context) ([]Tenant, error) {
-	endpoint := c.mtBase + "/beta/users/tenants"
+	endpoint := c.mtBaseURL() + "/beta/users/tenants"
 	var raw []Tenant
 	if err := c.doJSON(ctx, "GET", endpoint, AuthBearer, nil, &raw); err != nil {
 		return nil, err
@@ -285,7 +285,7 @@ func (c *Client) FetchShortProfiles(ctx context.Context, mris []string) ([]User,
 	if len(mris) == 0 {
 		return nil, nil
 	}
-	endpoint := c.mtBase + "/beta/users/fetchShortProfile?" + shortProfileQuery
+	endpoint := c.mtBaseURL() + "/beta/users/fetchShortProfile?" + shortProfileQuery
 	var resp fetchShortProfileResponse
 	if err := c.doJSON(ctx, "POST", endpoint, AuthBearer, mris, &resp); err != nil {
 		return nil, err
@@ -393,7 +393,7 @@ func (c *Client) FetchAvatar(ctx context.Context, mri string) ([]byte, string, e
 		return nil, "", fmt.Errorf("client missing self mri")
 	}
 	selfOID := strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")
-	endpoint := c.mtBase + "/beta/users/" + url.PathEscape(selfOID) + "/profilepicturev2/" + mri
+	endpoint := c.mtBaseURL() + "/beta/users/" + url.PathEscape(selfOID) + "/profilepicturev2/" + mri
 	if err := c.ensureFreshTokens(ctx, true, false); err != nil {
 		return nil, "", err
 	}
@@ -515,7 +515,7 @@ func (c *Client) FetchPersonCard(ctx context.Context, mri string) (*User, error)
 	q := url.Values{}
 	q.Set("hostAppPersonaId", string(hostAppPersonaID))
 	q.Set("teamsMri", mri)
-	base := c.delveBase
+	base := c.delveBaseURL()
 	if base == "" {
 		base = "https://nam.loki.delve.office.com"
 	}

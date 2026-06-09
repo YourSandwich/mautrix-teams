@@ -87,7 +87,7 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 		// together so ":" and "@" in the thread id stay encoded.
 		convID = threadID + ";messageid=" + opts.ParentID
 	}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(convID) + "/messages"
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(convID) + "/messages"
 	var resp sendMessageResponse
 	if err := c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp); err != nil {
 		return "", err
@@ -147,16 +147,22 @@ func (c *Client) EditMessage(ctx context.Context, threadID, messageID, newConten
 		IMDisplayName:   opts.DisplayName,
 		Properties:      buildProperties(opts),
 	}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/messages/" + url.PathEscape(messageID)
-	return c.doJSON(ctx, "PUT", endpoint, AuthSkype, body, nil)
+	if err := c.doJSON(ctx, "PUT", endpoint, AuthSkype, body, nil); err != nil {
+		return err
+	}
+	// Claim the edit's clientmessageid so its Trouter echo (which now routes as
+	// an edit, not a reaction) doesn't bounce back as a redundant edit.
+	c.MarkSent(body.ClientMessageID)
+	return nil
 }
 
 func (c *Client) DeleteMessage(ctx context.Context, threadID, messageID string) error {
 	if threadID == "" || messageID == "" {
 		return fmt.Errorf("empty thread or message id")
 	}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/messages/" + url.PathEscape(messageID)
 	return c.doJSON(ctx, "DELETE", endpoint, AuthSkype, nil, nil)
 }
@@ -172,7 +178,7 @@ func (c *Client) SendTyping(ctx context.Context, threadID string) error {
 		"contenttype": "Application/Message",
 		"messagetype": "Control/Typing",
 	}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) + "/messages"
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) + "/messages"
 	return c.doJSON(ctx, "POST", endpoint, AuthSkype, body, nil)
 }
 
@@ -182,7 +188,7 @@ func (c *Client) MarkRead(ctx context.Context, threadID, messageID string) error
 	}
 	horizon := fmt.Sprintf("%s;%s;%s", messageID, FormatTeamsTime(time.Now()), messageID)
 	body := map[string]string{"consumptionhorizon": horizon}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/properties?name=consumptionhorizon"
 	return c.doJSON(ctx, "PUT", endpoint, AuthSkype, body, nil)
 }
@@ -193,7 +199,7 @@ func (c *Client) AddReaction(ctx context.Context, threadID, messageID, emoji str
 	}
 	body := map[string]any{
 		"emotions": map[string]any{
-			"key":   teamsReactionKey(emoji),
+			"key":   TeamsReactionKey(emoji),
 			"value": time.Now().UnixMilli(),
 		},
 	}
@@ -206,22 +212,22 @@ func (c *Client) RemoveReaction(ctx context.Context, threadID, messageID, emoji 
 	}
 	body := map[string]any{
 		"emotions": map[string]any{
-			"key": teamsReactionKey(emoji),
+			"key": TeamsReactionKey(emoji),
 		},
 	}
 	return c.doJSON(ctx, "DELETE", c.reactionEndpoint(threadID, messageID), AuthSkype, body, nil)
 }
 
 func (c *Client) reactionEndpoint(threadID, messageID string) string {
-	return c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
+	return c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/messages/" + url.PathEscape(messageID) + "/properties?name=emotions"
 }
 
-// teamsReactionKey returns the Teams reaction key for a Matrix emoji. Uses
+// TeamsReactionKey returns the Teams reaction key for a Matrix emoji. Uses
 // the Teams emoji catalog (legacy short names like "cool" / "heart" and the
 // modern "<hex>_<name>" ids). Emojis missing from the catalog pass through
 // unchanged so Teams still stores them, just without a rendered bubble.
-func teamsReactionKey(emoji string) string {
+func TeamsReactionKey(emoji string) string {
 	if id, ok := teamsEmojiID[emoji]; ok {
 		return id
 	}
@@ -307,7 +313,7 @@ func (c *Client) FetchHistory(ctx context.Context, threadID string, opts History
 	if opts.Cursor != "" {
 		params.Set("syncState", opts.Cursor)
 	}
-	endpoint := c.chatSvcBase + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
+	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/messages?" + params.Encode()
 	var raw historyResponse
 	if err := c.doJSON(ctx, "GET", endpoint, AuthSkype, nil, &raw); err != nil {
@@ -437,7 +443,7 @@ func (c *Client) UploadAttachment(ctx context.Context, name, contentType string,
 	if skype == "" {
 		return nil, ErrUnauthorized
 	}
-	base := firstNonEmpty(c.amsBase, c.cfg.Endpoints.AMSBase, DefaultAMSBase)
+	base := firstNonEmpty(c.amsBaseURL(), c.cfg.Endpoints.AMSBase, DefaultAMSBase)
 
 	isImage := strings.HasPrefix(contentType, "image/")
 	isVideo := strings.HasPrefix(contentType, "video/")
@@ -744,9 +750,9 @@ func parsePropertiesFiles(props map[string]any) []SharedFile {
 	return out
 }
 
-// parsePropertiesMentions decodes the mentions array Teams ships as a JSON
-// string inside properties.mentions. Array index matches the itemid/tagId on
-// the inline <span itemtype=".../Mention"> tags in the message content.
+// parsePropertiesMentions decodes properties.mentions. The slice index must
+// match the inline span itemid, so non-person entries (bots, @channel) are kept
+// as empty-MRI placeholders rather than dropped, which would shift the indices.
 func parsePropertiesMentions(props map[string]any) []Mention {
 	if len(props) == 0 {
 		return nil
@@ -779,12 +785,9 @@ func parsePropertiesMentions(props map[string]any) []Mention {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil
 	}
-	out := make([]Mention, 0, len(entries))
-	for _, e := range entries {
-		if e.MRI == "" {
-			continue
-		}
-		out = append(out, Mention{UserID: e.MRI})
+	out := make([]Mention, len(entries))
+	for i, e := range entries {
+		out[i] = Mention{UserID: e.MRI}
 	}
 	return out
 }
