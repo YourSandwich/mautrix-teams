@@ -4,7 +4,7 @@
 _pkgname=mautrix-teams
 pkgname=${_pkgname}-git
 pkgver=28.0.r0.unknown
-pkgrel=2
+pkgrel=1
 pkgdesc="A Matrix-Microsoft Teams puppeting bridge (built from local git tree)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/YourSandwich/mautrix-teams"
