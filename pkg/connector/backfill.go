@@ -62,11 +62,18 @@ func (t *TeamsClient) FetchMessages(ctx context.Context, params bridgev2.FetchMe
 				newestFirst = append(newestFirst, bm)
 			}
 		}
-		cursor = result.Next
 		hasMore = result.HasMore
 		if !hasMore {
 			break
 		}
+		// Stop if the cursor stops advancing: a page of only filtered
+		// (call/system) messages can still report hasMore with the same
+		// cursor, which would otherwise re-fetch the same page forever.
+		if result.Next == cursor {
+			hasMore = false
+			break
+		}
+		cursor = result.Next
 	}
 
 	out := make([]*bridgev2.BackfillMessage, len(newestFirst))
