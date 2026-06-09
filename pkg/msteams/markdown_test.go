@@ -100,6 +100,40 @@ func TestMatrixToTeamsHTMLStripsMxReply(t *testing.T) {
 	}
 }
 
+func TestMatrixToTeamsHTMLParagraphs(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"multi paragraph", "<p>A</p>\n<p>B</p>", "A<br><br>B"},
+		{"single paragraph", "<p>only one</p>", "only one"},
+		{"inline only", "bold <strong>x</strong>", "bold <strong>x</strong>"},
+		{"inner break kept", "<p>line1<br>line2</p>", "line1<br>line2"},
+	}
+	for _, tc := range tests {
+		if got := MatrixToTeamsHTML(tc.in); got != tc.want {
+			t.Errorf("%s: MatrixToTeamsHTML(%q)=%q want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestMatrixToTeamsHTMLParagraphsKeepCodeBlock guards against the paragraph
+// pass eating the generated CodeBlockEditor placeholder <p>: paragraphs around
+// a code block must collapse to <br><br> while the placeholder and its paired
+// <pre> survive intact.
+func TestMatrixToTeamsHTMLParagraphsKeepCodeBlock(t *testing.T) {
+	in := "<p>A</p>\n<p>B</p><pre><code class=\"language-yaml\">k: v</code></pre>"
+	out := MatrixToTeamsHTML(in)
+	if !strings.Contains(out, "A<br><br>B") {
+		t.Errorf("paragraphs not flattened: %q", out)
+	}
+	if !strings.Contains(out, `itemtype="http://schema.skype.com/CodeBlockEditor"`) {
+		t.Errorf("CodeBlockEditor placeholder destroyed: %q", out)
+	}
+	if !strings.Contains(out, `itemid="codeBlockEditor-`) || !strings.Contains(out, "<pre ") {
+		t.Errorf("code <pre> not produced: %q", out)
+	}
+}
+
 func TestCollapseWhitespace(t *testing.T) {
 	tests := []struct {
 		in, want string
