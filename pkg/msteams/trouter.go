@@ -688,21 +688,27 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	default:
 		return
 	}
-	// Reaction-only MessageUpdate: Teams republishes the whole message on each
-	// emotion change. Without skypeeditedid it's not a real edit, so emit a
-	// ReactionSync so the bridge diffs against what's stored. Empty emotions
-	// (last reaction removed) still must propagate so Matrix drops the bubble.
-	if resourceType == "MessageUpdate" && r.SkypeEditedID == "" && r.DeleteTime == "" && !deletetimeFromProps(r.Properties) {
-		c.emit(Event{
-			Type:      EventTypeReaction,
-			ThreadID:  threadID,
-			Timestamp: ParseTeamsTime(r.ComposeTime),
-			Message: &Message{
-				ID:        r.ID,
+	// A content edit is marked by properties.edittime (skypeeditedid is unset on
+	// this service, and emotions rides along on both edits and reactions so can't
+	// gate); observeEditTime ignores the stale edittime on reaction republishes.
+	isDelete := r.DeleteTime != "" || deletetimeFromProps(r.Properties)
+	editTime := editTimeFromProps(r.Properties)
+	isEdit := r.SkypeEditedID != "" || (editTime != "" && c.observeEditTime(r.ID, editTime))
+
+	// A non-delete, non-edit MessageUpdate is a reaction republish.
+	if resourceType == "MessageUpdate" && !isDelete && !isEdit {
+		if hasEmotionsProp(r.Properties) {
+			c.emit(Event{
+				Type:      EventTypeReaction,
 				ThreadID:  threadID,
-				Reactions: parseEmotionsFromProps(r.Properties),
-			},
-		}, r.IMDisplayName)
+				Timestamp: ParseTeamsTime(r.ComposeTime),
+				Message: &Message{
+					ID:        r.ID,
+					ThreadID:  threadID,
+					Reactions: parseEmotionsFromProps(r.Properties),
+				},
+			}, r.IMDisplayName)
+		}
 		return
 	}
 	if c.claimSent(r.ClientMessageID) {
@@ -712,7 +718,7 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	if resourceType == "MessageUpdate" || r.SkypeEditedID != "" {
 		evType = EventTypeEditMessage
 	}
-	if r.DeleteTime != "" || deletetimeFromProps(r.Properties) {
+	if isDelete {
 		evType = EventTypeDeleteMessage
 	}
 	c.emit(Event{
@@ -787,6 +793,51 @@ func (c *Client) emit(ev Event, imDisplayName string) {
 	default:
 		c.log.Warn().Str("type", string(ev.Type)).Msg("Trouter event channel full; dropping")
 	}
+}
+
+// hasEmotionsProp reports whether the properties blob carries an emotions key at
+// all; an empty one (last reaction removed) must still propagate to clear bubbles.
+func hasEmotionsProp(props map[string]any) bool {
+	_, ok := props["emotions"]
+	return ok
+}
+
+// editTimeFromProps returns properties.edittime as a string ("" if absent); the
+// value only needs to compare equal across republishes.
+func editTimeFromProps(props map[string]any) string {
+	v, ok := props["edittime"]
+	if !ok || v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// observeEditTime reports whether editTime is newly-seen for msgID (and records
+// it), telling a fresh edit from the stale edittime that rides along on reaction
+// republishes. A cache miss counts as new so a real edit is never dropped.
+func (c *Client) observeEditTime(msgID, editTime string) bool {
+	c.editTimesLock.Lock()
+	defer c.editTimesLock.Unlock()
+	if c.editTimes == nil {
+		c.editTimes = make(map[string]string)
+	}
+	if c.editTimes[msgID] == editTime {
+		return false
+	}
+	// Evict before recording so the entry we're about to add always survives.
+	if len(c.editTimes) >= 8192 {
+		for k := range c.editTimes {
+			delete(c.editTimes, k)
+			if len(c.editTimes) <= 4096 {
+				break
+			}
+		}
+	}
+	c.editTimes[msgID] = editTime
+	return true
 }
 
 func parseEmotionsFromProps(props map[string]any) []Reaction {

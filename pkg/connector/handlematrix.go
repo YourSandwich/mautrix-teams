@@ -214,9 +214,11 @@ func (t *TeamsClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridge
 }
 
 func (t *TeamsClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
+	// Store the EmojiID as the Teams reaction key (not the glyph) so the echoed
+	// ReactionSync, which is keyed on the same key, dedups instead of duplicating.
 	return bridgev2.MatrixReactionPreResponse{
 		SenderID: teamsid.MakeUserID(t.UserMRI),
-		EmojiID:  networkid.EmojiID(msg.Content.RelatesTo.Key),
+		EmojiID:  networkid.EmojiID(msteams.TeamsReactionKey(msg.Content.RelatesTo.Key)),
 	}, nil
 }
 

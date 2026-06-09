@@ -116,32 +116,42 @@ type Client struct {
 	cachedProfiles     map[string]*User
 
 	// sentMessages dedupes our own outbound messages so the Trouter echo
-	// doesn't bounce back to Matrix as a duplicate.
+	// doesn't bounce back to Matrix as a duplicate. The value is the send time
+	// so overflow eviction can drop by age instead of map order.
 	sentMessagesLock sync.Mutex
-	sentMessages     map[string]struct{}
+	sentMessages     map[string]time.Time
+
+	// editTimes remembers the last properties.edittime per message so a reaction
+	// republish of an edited message isn't reprocessed as a fresh edit.
+	editTimesLock sync.Mutex
+	editTimes     map[string]string
 
 	// NGC and SkypeSpacesWeb both fire per incoming call (NGC twice).
 	recentRingMu sync.Mutex
 	recentRing   map[string]time.Time
 }
 
+// sentMessageTTL only needs to outlast the Trouter echo round-trip (seconds,
+// or longer across a reconnect), so a few minutes is a wide margin.
+const sentMessageTTL = 5 * time.Minute
+
 func (c *Client) MarkSent(clientMessageID string) {
 	if clientMessageID == "" {
 		return
 	}
+	now := time.Now()
 	c.sentMessagesLock.Lock()
 	defer c.sentMessagesLock.Unlock()
 	if c.sentMessages == nil {
-		c.sentMessages = make(map[string]struct{})
+		c.sentMessages = make(map[string]time.Time)
 	}
-	c.sentMessages[clientMessageID] = struct{}{}
+	c.sentMessages[clientMessageID] = now
 	if len(c.sentMessages) > 4096 {
-		i := 0
-		for k := range c.sentMessages {
-			delete(c.sentMessages, k)
-			i++
-			if i > 1024 {
-				break
+		// Evict by age, not map iteration order, so an id whose echo hasn't
+		// arrived yet is never dropped before it can be claimed.
+		for k, t := range c.sentMessages {
+			if now.Sub(t) > sentMessageTTL {
+				delete(c.sentMessages, k)
 			}
 		}
 	}
