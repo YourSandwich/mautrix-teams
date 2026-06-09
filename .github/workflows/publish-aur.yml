@@ -78,3 +78,8 @@ jobs:
           # build (libolm + several minutes of CI per release).
           test: true
           test_flags: --clean --cleanbuild --nodeps --nobuild
+          # The action runs `git add --all`, so drop makepkg's work dirs and the
+          # downloaded tarball first - AUR rejects any committed subdirectory.
+          post_process: |
+            rm -rf src pkg
+            rm -f -- *.tar.gz *.tar.zst *.pkg.tar.* || true
