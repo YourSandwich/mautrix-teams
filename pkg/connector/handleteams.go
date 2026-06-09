@@ -367,14 +367,38 @@ func (t *TeamsClient) convertIncomingEdit(
 	if err != nil {
 		return nil, err
 	}
-	part := converted.Parts[0]
-	return &bridgev2.ConvertedEdit{
-		ModifiedParts: []*bridgev2.ConvertedEditPart{{
-			Part:    existing[0],
-			Type:    part.Type,
-			Content: part.Content,
-		}},
-	}, nil
+	// Match re-converted parts to stored parts by PartID so a multi-part message
+	// (e.g. attachment + caption) updates every part, not just the first, and
+	// never writes one part's content onto another part's row.
+	byPart := make(map[networkid.PartID]*bridgev2.ConvertedMessagePart, len(converted.Parts))
+	for _, p := range converted.Parts {
+		byPart[p.ID] = p
+	}
+	out := &bridgev2.ConvertedEdit{}
+	for _, ex := range existing {
+		p, ok := byPart[ex.PartID]
+		if !ok {
+			out.DeletedParts = append(out.DeletedParts, ex)
+			continue
+		}
+		delete(byPart, ex.PartID)
+		out.ModifiedParts = append(out.ModifiedParts, &bridgev2.ConvertedEditPart{
+			Part:    ex,
+			Type:    p.Type,
+			Content: p.Content,
+		})
+	}
+	var added []*bridgev2.ConvertedMessagePart
+	for _, p := range converted.Parts {
+		if _, ok := byPart[p.ID]; ok {
+			added = append(added, p)
+			delete(byPart, p.ID)
+		}
+	}
+	if len(added) > 0 {
+		out.AddedParts = &bridgev2.ConvertedMessage{Parts: added}
+	}
+	return out, nil
 }
 
 func (t *TeamsClient) convertIncomingMessage(
@@ -488,9 +512,8 @@ func (t *TeamsClient) renderTeamsHTML(ctx context.Context, body string, propsMen
 	htmlOut = msteams.RewriteTeamsSpanMentions(htmlOut, func(itemID, name string) string {
 		idx, err := strconv.Atoi(itemID)
 		if err != nil || idx < 0 || idx >= len(propsMentions) {
-			if name == "" {
-				return ""
-			}
+			// Unknown index: keep a bold @name marker rather than dropping the
+			// span; an empty name degrades to a bare "@", same as renderMention.
 			return "<strong>@" + html.EscapeString(name) + "</strong>"
 		}
 		return renderMention(propsMentions[idx].UserID, name)
