@@ -51,7 +51,7 @@ var (
 	// separate image part.
 	stickerImgRegex  = regexp.MustCompile(`(?is)<img[^>]+itemtype=["']http://schema\.skype\.com/(?:Sticker|Giphy|FlikMsgPreview|VideoMsg)["'][^>]*>`)
 	inlineEmojiRegex = regexp.MustCompile(`(?is)<img[^>]+itemtype=["']http://schema\.skype\.com/(?:Emoji|EmojiAsImage)["'][^>]*>`)
-	amsFileRegex    = regexp.MustCompile(`(?is)<URIObject[^>]+type=["']File\.[^"']+["'][^>]*>.*?</URIObject>`)
+	amsFileRegex     = regexp.MustCompile(`(?is)<URIObject[^>]+type=["']File\.[^"']+["'][^>]*>.*?</URIObject>`)
 	// amsAnchorRegex catches Teams voice messages and other anchor-wrapped
 	// attachments: <a href=".../v1/objects/<id>/views/original">Voice message</a>.
 	amsAnchorRegex = regexp.MustCompile(`(?is)<a\s+href=["'](https?://[^"']+/v1/objects/[^"']+/views/[^"']+)["'][^>]*>([^<]*)</a>`)
@@ -201,15 +201,30 @@ func firstSubmatch(re *regexp.Regexp, s string) string {
 	return m[1]
 }
 
-// MatrixToTeamsHTML strips Matrix-only tags (mx-reply) and rewrites
-// <pre><code> into Teams' CodeBlockEditor shape so Teams clients render it
-// as a styled code block instead of a single wrapped line of plain text.
+// MatrixToTeamsHTML strips mx-reply, flattens paragraph breaks into <br>, and
+// rewrites <pre><code> into Teams' CodeBlockEditor shape (otherwise Teams
+// renders a code block as one wrapped line of plain text).
 func MatrixToTeamsHTML(in string) string {
 	if in == "" {
 		return ""
 	}
 	out := mxReplyPattern.ReplaceAllString(in, "")
+	out = normaliseParagraphs(out)
 	return convertMatrixCodeBlocks(out)
+}
+
+var (
+	// The \b after p keeps these patterns off <pre>/</pre>.
+	paraBoundaryPattern = regexp.MustCompile(`(?is)</p\b[^>]*>\s*<p\b[^>]*>`)
+	paraWrapPattern     = regexp.MustCompile(`(?is)</?p\b[^>]*>`)
+)
+
+// normaliseParagraphs rewrites paragraph breaks into <br>: Teams' compose path
+// collapses consecutive <p> into one paragraph and only honours <br>. Runs
+// before convertMatrixCodeBlocks so its <p> placeholder is never seen here.
+func normaliseParagraphs(in string) string {
+	out := paraBoundaryPattern.ReplaceAllString(in, "<br><br>")
+	return paraWrapPattern.ReplaceAllString(out, "")
 }
 
 var matrixCodeBlockPattern = regexp.MustCompile(`(?is)<pre[^>]*>\s*<code(\s+class=["']language-([^"']+)["'])?[^>]*>(.*?)</code>\s*</pre>`)
