@@ -56,7 +56,9 @@ jobs:
           sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        # Pinned to a commit SHA (not the movable v4.1.2 tag) so a hijacked tag
+        # can't swap in code that exfiltrates the AUR SSH key it receives.
+        uses: KSXGitHub/github-actions-deploy-aur@abe8ac26b51011c88be58c8809fd2ac674068ea5 # v4.1.2
         with:
           pkgname: mautrix-teams
           pkgbuild: packaging/arch/PKGBUILD
