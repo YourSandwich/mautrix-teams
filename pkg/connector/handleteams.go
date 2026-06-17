@@ -1,4 +1,5 @@
 // mautrix-teams - A Matrix-Microsoft Teams puppeting bridge.
+// Copyright (C) 2024 Tulir Asokan (mautrix-slack)
 // Copyright (C) 2026 Sandwich
 //
 // This program is free software: you can redistribute it and/or modify
