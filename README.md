@@ -44,17 +44,17 @@ below).
 | AMS file attachments (chat-service hosted)    | yes             | yes             |
 | SharePoint/OneDrive file attachments          | -               | yes             |
 | Typing indicators                             | yes             | yes             |
-| Read receipts                                 | yes             | yes             |
+| Read receipts                                 | yes             | -               |
 | Backfill (history on join)                    | -               | yes             |
 | Backfill attachments + reactions + replies    | -               | yes             |
-| Presence                                      | -               | partial         |
+| Presence                                      | -               | -               |
 | Send invites / kick / power level             | -               | -               |
 | User profile sync (name, avatar, contact)     | -               | yes             |
 | Directory metadata (job title, dept, phones)  | -               | yes             |
 | DM room topic populated from directory card   | -               | yes             |
 | Group chat name fallback from members         | -               | yes             |
 | Search and start-chat (people picker)         | yes             | -               |
-| Group creation                                | partial         | -               |
+| Group creation                                | yes             | -               |
 | Call notices (started / ended / recording)    | -               | yes             |
 | Call join link (click-through to Teams)       | -               | yes             |
 | Call media bridging                           | -               | -               |
@@ -112,6 +112,12 @@ write your own messages as your real MXID instead of as a ghost. See the
 docs](https://docs.mau.fi/bridges/general/double-puppeting.html) for ways
 to obtain the token.
 
+Without it, an edit you make on the Teams side to a message you originally
+sent from Matrix won't sync back - Matrix won't let the bridge ghost edit an
+event your own account owns. Edits to other people's messages, and to messages
+you sent on Teams, are unaffected. Double-puppet backfill also leans on
+appservice timestamp massaging, so weigh that trade-off before turning it on.
+
 ### First-sync rate limits (Synapse)
 
 On a fresh login the bridge creates a portal room per DM, group, and channel,
@@ -163,8 +169,9 @@ knobs:
   OAuth token). The reverse direction (uploading a Matrix file into the Teams
   chat's SharePoint folder) is not implemented; files sent from Matrix go
   through the AMS pipeline, which Teams renders as a plain attachment.
-- **Presence**: Trouter pushes user presence to the bridge, but the bridge
-  doesn't yet forward to Matrix per-user.
+- **Presence and Teams-side read receipts**: not bridged to Matrix. The bridge
+  sends your Matrix read receipts and typing to Teams, but the reverse
+  (Teams presence / read state) is not forwarded.
 - **Cross-tenant federation**: starting a chat works only for users your
   Teams tenant can already address (own tenant + accepted federation
   partners). Teams's directory rejects unknown MRIs server-side.

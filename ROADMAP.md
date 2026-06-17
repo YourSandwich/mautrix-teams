@@ -1,7 +1,8 @@
 # mautrix-teams roadmap
 
-Phases roughly track what purple-teams implements in C; each phase produces a
-visibly testable milestone. Check marks are what has shipped so far.
+Phases roughly track what purple-teams implements in C. The core protocol is in
+place - auth, realtime events, outbound messages, attachments and backfill all
+ship - so what remains is polish and a few Teams-only niceties.
 
 ## Phase 1: authentication - done
 
@@ -9,57 +10,62 @@ visibly testable milestone. Check marks are what has shipped so far.
 - [x] Skype-token minting via `teams.microsoft.com/api/authsvc/v1.0/authz`.
 - [x] Region-specific chat-service host learned from authz.
 - [x] `ensureFreshTokens` + one-shot 401 retry with token refresh.
-- [x] Cookie-based bridgev2 login flow + token capture JS.
+- [x] Device-code OAuth login flow (bridgev2).
 
 Login from Element successfully persists a UserLogin and reports
 `StateConnected`.
 
-## Phase 2: read-only chat enumeration - mostly done
+## Phase 2: read-only chat enumeration - done
 
 - [x] Conversation list (`/v1/users/ME/conversations`).
 - [x] Thread lookup (`/v1/threads/{id}`).
 - [x] User profile (`/beta/users/{mri}/profile`).
 - [x] Chat type classification (1:1 / group / channel / meeting).
 - [x] ChatResync events queued on `Connect`.
-- [ ] User search (`/beta/users/searchV2`).
-- [ ] 1:1 thread ID derivation for `StartOneOnOne`.
-- [ ] Group chat creation.
+- [x] User search (people picker).
+- [x] 1:1 thread ID derivation for `StartOneOnOne`.
+- [x] Group chat creation.
 
-## Phase 3: realtime events - not started
+## Phase 3: realtime events - done
 
-- [ ] Trouter endpoint registration (HTTP POST to trouter).
-- [ ] WebSocket handshake + Socket.IO-style framing decode (`1::`, `3:::`).
-- [ ] Chat-service subscription (subscribe + ACKs).
-- [ ] Event dispatch into `Client.events` channel.
-- [ ] Reconnect loop with backoff + 410/401 recovery.
+- [x] Trouter endpoint registration (HTTP POST to trouter).
+- [x] WebSocket handshake + Socket.IO-style framing decode (`1::`, `3:::`).
+- [x] Chat-service subscription (subscribe + ACKs).
+- [x] Event dispatch into `Client.events` channel.
+- [x] Reconnect loop with backoff + 401 recovery (a 410 falls into the same
+  full re-bootstrap).
 
-Until Phase 3 lands no realtime events reach Matrix; the bridge can push
-messages but not receive them.
+Realtime events flow in both directions; the bridge sends and receives.
 
-## Phase 4: outbound messages - done for text
+## Phase 4: outbound messages - done
 
 - [x] Send message (`POST /messages`) with `RichText/Html` or `Text`.
 - [x] Edit message (`PUT /messages/{id}`).
 - [x] Soft delete (`POST /messages/{id}/softdelete`).
 - [x] Typing indicator (`POST /messages` with `Control/Typing`).
 - [x] Consumption horizon read marker.
-- [ ] Reactions add / remove.
-- [ ] Mentions wire-up at send time.
+- [x] Reactions add / remove.
+- [x] Mentions wire-up at send time.
 
-## Phase 5: attachments - not started
+## Phase 5: attachments - mostly done
 
-- [ ] AMS three-step upload.
-- [ ] Incoming attachment download + mxc upload.
-- [ ] Voice-message transcoding (Matrix `audio/ogg` -> Teams `.wav`).
+- [x] AMS three-step upload.
+- [x] Incoming attachment download + mxc upload.
+- [x] Incoming SharePoint/OneDrive file download.
+- [ ] SharePoint upload from Matrix (files sent from Matrix go through AMS).
 
-## Phase 6: backfill and polish
+Voice messages bridge both ways without transcoding; Teams renders Matrix audio
+as a downloadable attachment rather than an inline player.
+
+## Phase 6: backfill and polish - mostly done
 
 - [x] Message history fetch with cursor.
 - [x] Teams HTML -> Matrix plaintext + formatted HTML conversion.
 - [x] `<mx-reply>` strip on the outbound path.
-- [ ] Thread backfill (replies under a parent).
+- [x] Thread backfill (replies + parent carried through the shared convert path).
 - [ ] Adaptive card rendering.
-- [ ] Custom emoji round-trip.
+- [ ] Custom emoji round-trip (non-catalog emoji show as raw hex on Teams).
+- [ ] Teams -> Matrix read receipts and presence.
 - [ ] Channel read-only mode.
 
 ## Non-goals
