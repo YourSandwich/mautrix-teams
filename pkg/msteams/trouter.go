@@ -1072,20 +1072,13 @@ func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint s
 	return firstErr
 }
 
-// generateCorrelationVector returns a 22-char base64-flavoured token that
-// matches what the Teams web client emits in the "cv" field. The chat service
-// uses this for tracing; it doesn't authenticate anything.
+// generateCorrelationVector returns a correlation-vector base for the "cv"
+// tracing field: standard base64 of 16 random bytes, which is the 22-char
+// form the Teams web client uses. It authenticates nothing.
 func generateCorrelationVector() string {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/+"
-	const suffix = "AgQw"
-	var b [22]byte
-	var rb [22]byte
-	_, _ = rand.Read(rb[:])
-	for i := 0; i < 21; i++ {
-		b[i] = chars[int(rb[i])%len(chars)]
-	}
-	b[21] = suffix[int(rb[21])%len(suffix)]
-	return string(b[:])
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return base64.RawStdEncoding.EncodeToString(b[:])
 }
 
 func newUUIDv4() string {
