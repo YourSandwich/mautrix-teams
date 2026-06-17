@@ -3,12 +3,12 @@ module go.mau.fi/mautrix-teams
 go 1.26.2
 
 require (
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/rs/zerolog v1.35.1
-	go.mau.fi/util v0.9.9
-	golang.org/x/net v0.55.0
+	go.mau.fi/util v0.9.10
+	golang.org/x/net v0.56.0
 	gopkg.in/yaml.v3 v3.0.1
-	maunium.net/go/mautrix v0.28.0
+	maunium.net/go/mautrix v0.28.1
 )
 
 require (
@@ -28,7 +28,7 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	go.mau.fi/zeroconfig v0.2.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/exp v0.0.0-20260603202125-055de637280b // indirect
+	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect

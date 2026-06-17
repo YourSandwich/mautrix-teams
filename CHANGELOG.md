@@ -6,6 +6,25 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [28.1] - 2026-06-17
+
+Tracks mautrix-go `v0.28.1`.
+
+### Changed
+
+- Bumped mautrix-go from `v0.28.0` to `v0.28.1` and refreshed dependencies
+  (`go.mau.fi/util` `v0.9.10`, `coder/websocket` `v1.8.15`, `golang.org/x/net`
+  `v0.56.0`). The bump pulls in the bridgev2 fix for child-portal `m.bridge`
+  events not updating when a parent space's name or avatar changes, plus
+  provisioning retry handling. No bridge code changes were needed.
+- Corrected the README feature matrix: Teams-to-Matrix read receipts and
+  presence were listed as supported but are not implemented, and Matrix-to-Teams
+  group creation was understated as partial. Documented that editing your own
+  Matrix-origin messages from Teams requires double-puppeting.
+- Rewrote the roadmap to match what actually ships - realtime events,
+  reactions, mentions, attachments and group creation were all marked
+  unstarted or pending despite being live.
+
 ## [28.0] - 2026-06-09
 
 Versioning continues to track the underlying mautrix-go release; `28.0` rides
