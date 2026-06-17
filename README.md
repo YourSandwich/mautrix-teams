@@ -183,11 +183,12 @@ Issues and PRs welcome on the GitHub repository.
 ## Acknowledgements
 
 - **[purple-teams](https://github.com/EionRobb/purple-teams)** by
-  [Eion Robb](https://github.com/EionRobb) - the entire Teams web-client
-  protocol implementation in `pkg/msteams` is a port of the C source from
-  this libpurple plugin. Without it the auth flow, the chat-service URL
-  layout, the AMS upload pipeline, the Trouter signalling, and a dozen other
-  protocol details would have taken months to reverse-engineer. Massive thanks.
+  [Eion Robb](https://github.com/EionRobb) - the reference for the undocumented
+  Teams web-client protocol: the auth flow, the chat-service URL layout, the
+  AMS upload pipeline, and the Trouter signalling. `pkg/msteams` is an
+  independent Go reimplementation of that protocol - the endpoints, scopes and
+  wire formats are Microsoft's, and purple-teams is what mapped them out.
+  Without it this would have taken months to reverse-engineer. Massive thanks.
 - **[mautrix-slack](https://github.com/mautrix/slack)** by
   [Tulir Asokan](https://github.com/tulir) - the bridge structure
   (NetworkConnector layout, login flows, identifier mapping, double-puppet
