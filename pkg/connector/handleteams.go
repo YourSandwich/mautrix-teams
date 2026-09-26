@@ -297,7 +297,10 @@ func (t *TeamsClient) queueTypingEvent(ev msteams.Event) {
 	if ev.ThreadID == "" || ev.TypingFrom == "" || ev.TypingFrom == t.UserMRI {
 		return
 	}
-	senderID := teamsid.MakeUserID(ev.TypingFrom)
+	sender := bridgev2.EventSender{
+		Sender:      teamsid.MakeUserID(ev.TypingFrom),
+		SenderLogin: teamsid.MakeUserLoginID(ev.TypingFrom),
+	}
 	timeout := 15 * time.Second
 	if ev.TypingStop {
 		timeout = 0
@@ -306,9 +309,20 @@ func (t *TeamsClient) queueTypingEvent(ev msteams.Event) {
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventTyping,
 			PortalKey: teamsid.MakePortalKey(ev.ThreadID, t.UserLogin.ID, t.splitPortals()),
-			Sender: bridgev2.EventSender{
-				Sender:      senderID,
-				SenderLogin: teamsid.MakeUserLoginID(ev.TypingFrom),
+			Sender:    sender,
+			// Members who haven't posted since the portal was created have no
+			// ghost in the room, and Matrix rejects typing from non-members.
+			PreHandleFunc: func(ctx context.Context, portal *bridgev2.Portal) {
+				if portal.MXID == "" {
+					return
+				}
+				intent, ok := portal.GetIntentFor(ctx, sender, t.UserLogin, bridgev2.RemoteEventTyping)
+				if !ok {
+					return
+				}
+				if err := intent.EnsureJoined(ctx, portal.MXID); err != nil {
+					zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to join typing ghost to portal")
+				}
 			},
 		},
 		Timeout: timeout,
