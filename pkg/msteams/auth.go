@@ -52,6 +52,9 @@ const (
 	// is the Office Loki Delve service registration.
 	delveOAuthScope = "394866fc-eedb-4f01-8536-3ff84b16be2a/.default offline_access"
 
+	// Token responses for audiences with long scope lists exceed 12 KB.
+	tokenResponseLimit = 1 << 20
+
 	graphOAuthScope = "https://graph.microsoft.com/.default offline_access"
 	graphBaseURL    = "https://graph.microsoft.com/v1.0"
 
@@ -158,10 +161,10 @@ func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride st
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, tokenResponseLimit))
 	var out oauthTokenResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
+		return nil, fmt.Errorf("decode token response (%d): %w", resp.StatusCode, err)
 	}
 	if resp.StatusCode >= 400 || out.Error != "" {
 		if out.Error == "invalid_grant" {
@@ -546,12 +549,12 @@ func PollDeviceCode(ctx context.Context, httpClient *http.Client, tenant, device
 		if err != nil {
 			return nil, err
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, tokenResponseLimit))
 		resp.Body.Close()
 
 		var tok oauthTokenResponse
 		if err := json.Unmarshal(body, &tok); err != nil {
-			return nil, fmt.Errorf("decode token response: %w", err)
+			return nil, fmt.Errorf("decode token response (%d): %w", resp.StatusCode, err)
 		}
 
 		if tok.AccessToken != "" {
