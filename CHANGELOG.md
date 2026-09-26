@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [31.0] - 2026-09-26
+
+Tracks mautrix-go `v0.31.0`.
+
 ### Added
 
 - Teams membership changes (members added, removed, joining or leaving a
