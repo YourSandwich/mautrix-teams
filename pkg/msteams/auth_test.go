@@ -17,9 +17,11 @@ package msteams
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -97,6 +99,27 @@ func TestRefreshAuthTokenInvalidGrant(t *testing.T) {
 
 	if err := c.RefreshAuthToken(context.Background()); !errors.Is(err, ErrTokenInvalid) {
 		t.Errorf("expected ErrTokenInvalid, got %v", err)
+	}
+}
+
+func TestRefreshGraphTokenLargeResponse(t *testing.T) {
+	scope := strings.Repeat("https://graph.microsoft.com/Files.ReadWrite.All ", 400)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "graph-access", "expires_in": 3600, "scope": scope})
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:test", TenantID: "tenant", RefreshToken: "refresh", Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.tokenEndpointForTest = srv.URL
+
+	token, err := c.scopedToken(context.Background(), &c.graphAuth, c.RefreshGraphToken)
+	if err != nil || token != "graph-access" {
+		t.Fatalf("got %q, %v", token, err)
 	}
 }
 
