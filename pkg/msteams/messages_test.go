@@ -402,6 +402,26 @@ func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
 	}
 }
 
+func TestTrouterMessageLossSignalsResync(t *testing.T) {
+	c := newClientAt(t, "http://unused")
+	for range cap(c.events) {
+		c.events <- Event{Type: EventTypeTyping}
+	}
+	for range 5 {
+		c.handleTrouterEvent([]byte(`{"name":"trouter.message_loss","args":[{}]}`))
+	}
+	select {
+	case <-c.ResyncNeeded():
+	default:
+		t.Fatal("message_loss was not signalled with the event channel full")
+	}
+	select {
+	case <-c.ResyncNeeded():
+		t.Error("a burst must coalesce into one pending signal")
+	default:
+	}
+}
+
 func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
 	giphy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "" {

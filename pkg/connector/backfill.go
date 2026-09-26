@@ -86,6 +86,9 @@ func (t *TeamsClient) FetchMessages(ctx context.Context, params bridgev2.FetchMe
 		Cursor:   networkid.PaginationCursor(cursor),
 		HasMore:  hasMore,
 		Forward:  params.Forward,
+		// Matrix-sent messages are stored with Teams' arrival time but history
+		// carries compose time, so the timestamp cutoff alone can re-bridge them.
+		AggressiveDeduplication: params.Forward,
 	}, nil
 }
 

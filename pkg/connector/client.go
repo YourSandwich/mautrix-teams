@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -208,14 +209,23 @@ func (t *TeamsClient) FillBridgeState(state status.BridgeState) status.BridgeSta
 	return state
 }
 
+// message_loss arrives in bursts around a reconnect; one catch-up covers them.
+const resyncDelay = 10 * time.Second
+
 func (t *TeamsClient) eventLoop(ctx context.Context) {
 	log := zerolog.Ctx(ctx)
 	log.Debug().Msg("Teams event loop started")
+	var resync <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			log.Debug().Msg("Teams event loop stopped")
 			return
+		case <-resync:
+			resync = nil
+			go t.resyncChats(ctx)
+		case <-t.Client.ResyncNeeded():
+			resync = time.After(resyncDelay)
 		case ev, ok := <-t.Client.Events():
 			if !ok {
 				log.Debug().Msg("Teams event channel closed")

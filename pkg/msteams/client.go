@@ -76,6 +76,8 @@ type Client struct {
 	http   *http.Client
 	log    zerolog.Logger
 	events chan Event
+	// Kept apart from events so a full event queue can't drop it.
+	resyncNeeded chan struct{}
 
 	authzURLForTest      string
 	tokenEndpointForTest string
@@ -223,17 +225,18 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
-		cfg:         cfg,
-		http:        &http.Client{Timeout: 60 * time.Second},
-		log:         cfg.Logger.With().Str("component", "msteams").Logger(),
-		events:      make(chan Event, 256),
-		skype:       &Token{Value: cfg.SkypeToken},
-		auth:        &Token{Value: cfg.AuthToken},
-		refresh:     cfg.RefreshToken,
-		chatSvcBase: firstNonEmpty(cfg.Endpoints.ChatSvcBase, DefaultChatSvcBase),
-		mtBase:      firstNonEmpty(cfg.Endpoints.MTBase, DefaultMTBase),
-		stopCtx:     ctx,
-		stopCancel:  cancel,
+		cfg:          cfg,
+		http:         &http.Client{Timeout: 60 * time.Second},
+		log:          cfg.Logger.With().Str("component", "msteams").Logger(),
+		events:       make(chan Event, 256),
+		resyncNeeded: make(chan struct{}, 1),
+		skype:        &Token{Value: cfg.SkypeToken},
+		auth:         &Token{Value: cfg.AuthToken},
+		refresh:      cfg.RefreshToken,
+		chatSvcBase:  firstNonEmpty(cfg.Endpoints.ChatSvcBase, DefaultChatSvcBase),
+		mtBase:       firstNonEmpty(cfg.Endpoints.MTBase, DefaultMTBase),
+		stopCtx:      ctx,
+		stopCancel:   cancel,
 	}
 	return c, nil
 }
@@ -297,6 +300,10 @@ func (c *Client) IsLoggedIn() bool {
 
 func (c *Client) Events() <-chan Event {
 	return c.events
+}
+
+func (c *Client) ResyncNeeded() <-chan struct{} {
+	return c.resyncNeeded
 }
 
 func (c *Client) UserMRI() string {
