@@ -58,6 +58,8 @@ const (
 	graphOAuthScope = "https://graph.microsoft.com/.default offline_access"
 	graphBaseURL    = "https://graph.microsoft.com/v1.0"
 
+	ic3OAuthScope = "https://ic3.teams.office.com/.default offline_access"
+
 	workAuthzURL     = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 	personalAuthzURL = "https://teams.live.com/api/auth/v1.0/authz/consumer"
 
@@ -253,6 +255,18 @@ func (c *Client) scopedToken(ctx context.Context, slot **Token, refresh func(con
 	return tok.Value, nil
 }
 
+func (c *Client) RefreshIC3Token(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, ic3OAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.ic3Auth, out)
+	return nil
+}
+
 func (c *Client) RefreshGraphToken(ctx context.Context) error {
 	if IsConsumerTenant(c.cfg.TenantID) {
 		return ErrNotImplemented
@@ -393,6 +407,11 @@ func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 	// Loki/Delve people-card service is hosted in three GEO partitions
 	// (nam/eur/apc); pick the right prefix from the user's data residency.
 	c.delveBase = "https://" + lokiPrefixFor(resp) + ".loki.delve.office.com"
+	c.calling = callingEndpoints{
+		conversationURL: resp.RegionGtms["calling_conversationServiceUrl"],
+		region:          resp.Region,
+		partition:       resp.Partition,
+	}
 	chatSvc, mt, csa, ams, delve := c.chatSvcBase, c.mtBase, c.csaBase, c.amsBase, c.delveBase
 	c.tokenLock.Unlock()
 	c.log.Debug().
