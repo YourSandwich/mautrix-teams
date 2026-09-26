@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 )
 
@@ -246,6 +245,9 @@ type fetchShortProfileResponse struct {
 
 const shortProfileQuery = "isMailAddress=false&canBeSmtpAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true&includeBots=true"
 
+// fetchShortProfile returns nothing for bots; the web client names them through users/fetch.
+const botProfileQuery = "isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false"
+
 type Tenant struct {
 	TenantID    string `json:"tenantId"`
 	DisplayName string `json:"tenantName"`
@@ -289,13 +291,32 @@ func directoryMRI(mri string) bool {
 }
 
 func (c *Client) FetchShortProfiles(ctx context.Context, mris []string) ([]User, error) {
-	mris = slices.DeleteFunc(slices.Clone(mris), func(mri string) bool { return !directoryMRI(mri) })
+	var people, bots []string
+	for _, mri := range mris {
+		switch {
+		case strings.HasPrefix(mri, "8:orgid:"):
+			people = append(people, mri)
+		case strings.HasPrefix(mri, "28:"):
+			bots = append(bots, mri)
+		}
+	}
+	users, err := c.fetchProfiles(ctx, "/beta/users/fetchShortProfile?"+shortProfileQuery, people)
+	if err != nil {
+		return nil, err
+	}
+	botUsers, err := c.fetchProfiles(ctx, "/beta/users/fetch?"+botProfileQuery, bots)
+	if err != nil {
+		return nil, err
+	}
+	return append(users, botUsers...), nil
+}
+
+func (c *Client) fetchProfiles(ctx context.Context, path string, mris []string) ([]User, error) {
 	if len(mris) == 0 {
 		return nil, nil
 	}
-	endpoint := c.mtBaseURL() + "/beta/users/fetchShortProfile?" + shortProfileQuery
 	var resp fetchShortProfileResponse
-	if err := c.doJSON(ctx, "POST", endpoint, AuthBearer, mris, &resp); err != nil {
+	if err := c.doJSON(ctx, "POST", c.mtBaseURL()+path, AuthBearer, mris, &resp); err != nil {
 		return nil, err
 	}
 	rows := resp.Value
@@ -863,6 +884,11 @@ func peersFromThreadID(id string) []string {
 		out := make([]string, 0, len(parts))
 		for _, p := range parts {
 			if strings.Count(p, "-") != 4 {
+				continue
+			}
+			// The Echo bot's app id sits in its 1:1 thread id like a user's object id.
+			if "28:"+p == EchoBotMRI {
+				out = append(out, EchoBotMRI)
 				continue
 			}
 			out = append(out, "8:orgid:"+p)

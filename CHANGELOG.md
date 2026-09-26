@@ -71,6 +71,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   messages and uploaded it to the homeserver again, only to drop the messages
   as already bridged. Forward backfill now stops at the newest bridged
   message before converting anything.
+- The chat with the Teams Echo bot, which Teams test calls and `call-test`
+  create, showed up as an unnamed room: the bridge took the bot for a
+  person. Bots are now looked up the way the Teams web client does, so they
+  get their names.
 
 ### Security
 
