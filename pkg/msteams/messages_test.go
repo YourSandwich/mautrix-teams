@@ -422,6 +422,21 @@ func TestTrouterMessageLossSignalsResync(t *testing.T) {
 	}
 }
 
+func TestTrouterEndpointIDPersists(t *testing.T) {
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:me", TrouterEndpointID: "saved-epid", Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if got := c.TrouterEndpointID(); got != "saved-epid" {
+		t.Errorf("got %q, want the configured id", got)
+	}
+	fresh := newClientAt(t, "http://unused")
+	if a, b := fresh.TrouterEndpointID(), fresh.TrouterEndpointID(); a == "" || a != b {
+		t.Errorf("generated id must be stable within a client: %q vs %q", a, b)
+	}
+}
+
 func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
 	giphy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "" {

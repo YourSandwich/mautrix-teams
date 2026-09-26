@@ -35,7 +35,8 @@ type UserLoginMetadata struct {
 	// TenantName is the organisation display name pulled from the
 	// middle-tier (e.g. "Scientific Games, LLC"). Used as the label for the
 	// personal filtering space so multi-tenant users can tell accounts apart.
-	TenantName string `json:"tenant_name,omitempty"`
+	TenantName        string `json:"tenant_name,omitempty"`
+	TrouterEndpointID string `json:"trouter_endpoint_id,omitempty"`
 }
 
 type PortalMetadata struct {
