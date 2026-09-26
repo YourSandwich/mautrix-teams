@@ -52,6 +52,9 @@ const (
 	// is the Office Loki Delve service registration.
 	delveOAuthScope = "394866fc-eedb-4f01-8536-3ff84b16be2a/.default offline_access"
 
+	graphOAuthScope = "https://graph.microsoft.com/.default offline_access"
+	graphBaseURL    = "https://graph.microsoft.com/v1.0"
+
 	workAuthzURL     = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 	personalAuthzURL = "https://teams.live.com/api/auth/v1.0/authz/consumer"
 
@@ -226,6 +229,36 @@ func (c *Client) RefreshDelveToken(ctx context.Context) error {
 		return err
 	}
 	c.storeOAuthToken(&c.delveAuth, out)
+	return nil
+}
+
+func (c *Client) scopedToken(ctx context.Context, slot **Token, refresh func(context.Context) error) (string, error) {
+	c.tokenLock.RLock()
+	tok := *slot
+	c.tokenLock.RUnlock()
+	if tok.Expired() {
+		if err := refresh(ctx); err != nil {
+			return "", err
+		}
+		c.tokenLock.RLock()
+		tok = *slot
+		c.tokenLock.RUnlock()
+	}
+	if tok == nil || tok.Value == "" {
+		return "", ErrUnauthorized
+	}
+	return tok.Value, nil
+}
+
+func (c *Client) RefreshGraphToken(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, graphOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.graphAuth, out)
 	return nil
 }
 

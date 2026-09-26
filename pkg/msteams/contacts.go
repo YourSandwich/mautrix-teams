@@ -466,7 +466,8 @@ func (c *Client) SearchUsers(ctx context.Context, query string) ([]User, error) 
 	if query == "" {
 		return nil, nil
 	}
-	if err := c.ensureSearchToken(ctx); err != nil {
+	token, err := c.scopedToken(ctx, &c.searchAuth, c.RefreshSearchToken)
+	if err != nil {
 		return nil, err
 	}
 	reqID := newUUIDv4()
@@ -478,7 +479,7 @@ func (c *Client) SearchUsers(ctx context.Context, query string) ([]User, error) 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.searchTokenValue())
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-AnchorMailbox", "Oid:"+strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")+"@"+c.cfg.TenantID)
@@ -516,7 +517,8 @@ func (c *Client) FetchPersonCard(ctx context.Context, mri string) (*User, error)
 	if mri == "" {
 		return nil, fmt.Errorf("empty mri")
 	}
-	if err := c.ensureDelveToken(ctx); err != nil {
+	token, err := c.scopedToken(ctx, &c.delveAuth, c.RefreshDelveToken)
+	if err != nil {
 		return nil, err
 	}
 	hostAppPersonaID, _ := json.Marshal(map[string]any{
@@ -541,7 +543,7 @@ func (c *Client) FetchPersonCard(ctx context.Context, mri string) (*User, error)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.delveTokenValue())
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
@@ -557,25 +559,6 @@ func (c *Client) FetchPersonCard(ctx context.Context, mri string) (*User, error)
 		return nil, fmt.Errorf("loki person: %d %s", resp.StatusCode, string(rb))
 	}
 	return parseLokiPerson(mri, rb)
-}
-
-func (c *Client) ensureDelveToken(ctx context.Context) error {
-	c.tokenLock.RLock()
-	tok := c.delveAuth
-	c.tokenLock.RUnlock()
-	if tok != nil && !tok.Expired() {
-		return nil
-	}
-	return c.RefreshDelveToken(ctx)
-}
-
-func (c *Client) delveTokenValue() string {
-	c.tokenLock.RLock()
-	defer c.tokenLock.RUnlock()
-	if c.delveAuth == nil {
-		return ""
-	}
-	return c.delveAuth.Value
 }
 
 func parseLokiPerson(mri string, data []byte) (*User, error) {
@@ -639,25 +622,6 @@ func parseLokiPerson(mri string, data []byte) (*User, error) {
 		}
 	}
 	return u, nil
-}
-
-func (c *Client) ensureSearchToken(ctx context.Context) error {
-	c.tokenLock.RLock()
-	tok := c.searchAuth
-	c.tokenLock.RUnlock()
-	if tok != nil && !tok.Expired() {
-		return nil
-	}
-	return c.RefreshSearchToken(ctx)
-}
-
-func (c *Client) searchTokenValue() string {
-	c.tokenLock.RLock()
-	defer c.tokenLock.RUnlock()
-	if c.searchAuth == nil {
-		return ""
-	}
-	return c.searchAuth.Value
 }
 
 func substrateRequest(query, reqID string) map[string]any {

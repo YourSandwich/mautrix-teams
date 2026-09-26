@@ -17,6 +17,7 @@ package msteams
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -434,6 +435,61 @@ func TestTrouterEndpointIDPersists(t *testing.T) {
 	fresh := newClientAt(t, "http://unused")
 	if a, b := fresh.TrouterEndpointID(), fresh.TrouterEndpointID(); a == "" || a != b {
 		t.Errorf("generated id must be stable within a client: %q vs %q", a, b)
+	}
+}
+
+func TestFetchSharedFileFallsBackToGraph(t *testing.T) {
+	var scopes []string
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		scopes = append(scopes, r.PostForm.Get("scope"))
+		_, _ = w.Write([]byte(`{"access_token":"tok-` + strings.Fields(r.PostForm.Get("scope"))[0] + `","expires_in":3600}`))
+	}))
+	t.Cleanup(tokens.Close)
+	const share = "https://contoso-my.sharepoint.com/:u:/g/personal/bob/EabcXYZ"
+	wantPath := "/shares/u!" + base64.RawURLEncoding.EncodeToString([]byte(share)) + "/driveItem/content"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_layouts/15/download.aspx"):
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"accessDenied"}}`))
+		case r.URL.Path == wantPath:
+			if r.Header.Get("Authorization") != "Bearer tok-https://graph.microsoft.com/.default" {
+				t.Errorf("graph auth = %q", r.Header.Get("Authorization"))
+			}
+			http.Redirect(w, r, "/download/report.zip", http.StatusFound)
+		case r.URL.Path == "/download/report.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write([]byte("zip-bytes"))
+		default:
+			t.Errorf("unexpected %s", r.URL)
+			w.WriteHeader(http.StatusTeapot)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:me", TenantID: "tenant", RefreshToken: "rt", Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.tokenEndpointForTest = tokens.URL
+	c.graphURLForTest = srv.URL
+
+	data, ctype, err := c.FetchSharedFile(context.Background(), SharedFile{
+		Name:     "report.zip",
+		ItemID:   "00000000-0000-0000-0000-0000000000f1",
+		SiteURL:  srv.URL + "/personal/bob/",
+		ShareURL: share,
+	})
+	if err != nil {
+		t.Fatalf("FetchSharedFile: %v", err)
+	}
+	if string(data) != "zip-bytes" || ctype != "application/zip" {
+		t.Errorf("got %q %q", data, ctype)
+	}
+	if len(scopes) != 2 || !strings.HasPrefix(scopes[1], "https://graph.microsoft.com/.default") {
+		t.Errorf("token scopes = %v", scopes)
 	}
 }
 
