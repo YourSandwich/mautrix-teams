@@ -85,9 +85,9 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 	}
 	convID := threadID
 	if opts.ParentID != "" {
-		// Teams encodes thread replies by suffixing the conversation ID
-		// with ";messageid=<parent>" - both halves go through PathEscape
-		// together so ":" and "@" in the thread id stay encoded.
+		// Thread replies suffix the conversation id with ";messageid=<parent>".
+		// PathEscape sends the ";" as %3B while Squads sends it raw; which one
+		// the chat service wants for a POST is unverified.
 		convID = threadID + ";messageid=" + opts.ParentID
 	}
 	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(convID) + "/messages"

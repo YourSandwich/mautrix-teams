@@ -51,8 +51,11 @@ Realtime events flow in both directions; the bridge sends and receives.
 
 - [x] AMS three-step upload.
 - [x] Incoming attachment download + mxc upload.
-- [x] Incoming SharePoint/OneDrive file download.
-- [ ] SharePoint upload from Matrix (files sent from Matrix go through AMS).
+- [x] Incoming SharePoint/OneDrive file download, with a Microsoft Graph
+  shares fallback for files SharePoint refuses.
+- [x] Matrix files uploaded to the sender's OneDrive, shared with the chat and
+  posted as Teams file cards, as the web client does.
+- [ ] Files sent from Matrix to channels (stored in the team's SharePoint site).
 
 Voice messages bridge both ways without transcoding; Teams renders Matrix audio
 as a downloadable attachment rather than an inline player.
@@ -68,9 +71,24 @@ as a downloadable attachment rather than an inline player.
 - [x] Teams -> Matrix presence for direct-chat partners (opt-in).
 - [ ] Teams -> Matrix read receipts.
 - [ ] Channel read-only mode.
+- [x] Live roster and chat-name sync in both directions; invites, kicks and
+  group creation from Matrix.
+- [x] Catch-up after Trouter message loss.
+
+## Phase 7: calls - started
+
+- [x] Teams audio media leg (ICE, SDES-SRTP, PCMU) in `pkg/teamsmedia`.
+- [x] Outgoing Teams call signalling and the `call-test` command, verified on a
+  production tenant with audio both ways.
+- [ ] Join bridged audio to Element Call (MatrixRTC on LiveKit), off by default
+  behind `calls.element_call`: membership events, LiveKit token, Opus/PCMU
+  transcoding, media E2EE in encrypted rooms.
+- [ ] Incoming Teams calls (needs captures of the ring payload's attach step).
+- [ ] Video (X-H264UC packetisation and Microsoft RTCP feedback), meetings,
+  screen sharing.
 
 ## Non-goals
 
-- Hosting meetings, presenting, or any A/V call bridging.
+- Hosting meetings or presenting.
 - Guest / federated / external tenant access (out of scope for v1).
 - Admin / compliance APIs that require application permissions.
