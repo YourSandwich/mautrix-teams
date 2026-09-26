@@ -119,13 +119,17 @@ func ExtractAMSAttachments(body string) []AMSAttachment {
 		if uri == "" {
 			continue
 		}
+		if !strings.Contains(uri, "/views/") {
+			uri = strings.TrimSuffix(uri, "/") + "/views/original"
+		}
 		name := firstSubmatch(attrNameRegex, m)
 		if name == "" {
 			name = "file"
 		}
 		out = append(out, AMSAttachment{URL: uri, AltText: name, IsImage: false})
 	}
-	for _, m := range amsAnchorRegex.FindAllStringSubmatch(body, -1) {
+	// A File.1 object carries its own <a href> to the same file.
+	for _, m := range amsAnchorRegex.FindAllStringSubmatch(amsFileRegex.ReplaceAllString(body, ""), -1) {
 		if len(m) != 3 {
 			continue
 		}

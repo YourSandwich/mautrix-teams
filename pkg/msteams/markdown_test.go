@@ -148,3 +148,18 @@ func TestCollapseWhitespace(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractFileURIObjectUsesOriginalView(t *testing.T) {
+	body := `<URIObject type="File.1" uri="https://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-abc" url_thumbnail="https://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-abc/views/thumbnail"><Title>r.zip</Title><a href="https://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-abc/views/original">r.zip</a><OriginalName v="r.zip"/><FileSize v="3"/></URIObject>`
+	atts := ExtractAMSAttachments(body)
+	if len(atts) != 1 {
+		t.Fatalf("got %d attachments", len(atts))
+	}
+	if want := "https://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-abc/views/original"; atts[0].URL != want || atts[0].AltText != "r.zip" {
+		t.Errorf("got %+v", atts[0])
+	}
+	withView := strings.Replace(body, `/0-abc" url_thumbnail`, `/0-abc/views/original" url_thumbnail`, 1)
+	if got := ExtractAMSAttachments(withView)[0].URL; strings.Count(got, "/views/") != 1 {
+		t.Errorf("an explicit view must be kept as is, got %q", got)
+	}
+}
