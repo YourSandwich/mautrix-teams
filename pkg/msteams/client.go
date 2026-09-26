@@ -48,6 +48,8 @@ type ClientConfig struct {
 	UserAgent    string
 	Endpoints    Endpoints
 	Logger       zerolog.Logger
+	// Reused across restarts: Teams caps endpoints per account.
+	TrouterEndpointID string
 }
 
 type Endpoints struct {
@@ -237,6 +239,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		mtBase:       firstNonEmpty(cfg.Endpoints.MTBase, DefaultMTBase),
 		stopCtx:      ctx,
 		stopCancel:   cancel,
+	}
+	if cfg.TrouterEndpointID != "" {
+		c.trouterEndpoint.Store(&cfg.TrouterEndpointID)
 	}
 	return c, nil
 }

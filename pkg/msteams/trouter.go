@@ -78,6 +78,10 @@ func (c *Client) startTrouter(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) TrouterEndpointID() string {
+	return c.trouterEndpointID()
+}
+
 // trouterEndpointID returns a stable per-Client endpoint UUID, reused across reconnects.
 func (c *Client) trouterEndpointID() string {
 	if v := c.trouterEndpoint.Load(); v != nil {
@@ -225,6 +229,10 @@ func (c *Client) runTrouter(conn *websocket.Conn, info *trouterInfo, endpoint st
 		case <-c.stopCtx.Done():
 			return
 		case <-time.After(5 * time.Second):
+		}
+		if err := c.ensureFreshTokens(c.stopCtx, true, true); err != nil {
+			c.log.Warn().Err(err).Msg("Token refresh before Trouter reconnect failed")
+			continue
 		}
 		newInfo, err := c.trouterRegister(c.stopCtx, endpoint)
 		if err != nil {
@@ -1030,6 +1038,9 @@ func (c *Client) trouterSendActive(ctx context.Context, conn *websocket.Conn, ac
 // matters: TeamsCDLWebWorker (the messaging app) must be the last call so the
 // chatsvc reuses our endpoint id rather than minting a new one.
 func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint string) error {
+	if err := c.ensureFreshTokens(ctx, true, true); err != nil {
+		return fmt.Errorf("refresh tokens for registrar: %w", err)
+	}
 	apps := []struct {
 		appID, templateKey, path string
 	}{

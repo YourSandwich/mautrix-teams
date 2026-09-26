@@ -59,12 +59,13 @@ var (
 func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	meta := login.Metadata.(*UserLoginMetadata)
 	cfg := msteams.ClientConfig{
-		TenantID:     meta.TenantID,
-		UserMRI:      meta.UserMRI,
-		SkypeToken:   meta.SkypeToken,
-		AuthToken:    meta.AuthToken,
-		RefreshToken: meta.RefreshToken,
-		Logger:       login.Log,
+		TenantID:          meta.TenantID,
+		UserMRI:           meta.UserMRI,
+		SkypeToken:        meta.SkypeToken,
+		AuthToken:         meta.AuthToken,
+		RefreshToken:      meta.RefreshToken,
+		Logger:            login.Log,
+		TrouterEndpointID: meta.TrouterEndpointID,
 	}
 	if meta.ChatSvcBase != "" {
 		cfg.Endpoints.ChatSvcBase = meta.ChatSvcBase
@@ -129,6 +130,10 @@ func (t *TeamsClient) persistTokens(ctx context.Context) {
 	}
 	if chatSvc := t.Client.ChatSvcBase(); chatSvc != "" && meta.ChatSvcBase != chatSvc {
 		meta.ChatSvcBase = chatSvc
+		dirty = true
+	}
+	if epid := t.Client.TrouterEndpointID(); meta.TrouterEndpointID != epid {
+		meta.TrouterEndpointID = epid
 		dirty = true
 	}
 	// Pull the organisation name once per session so the personal space can
