@@ -41,14 +41,17 @@ below).
 | GIFs (animated)                               | yes             | yes             |
 | Videos (with transcoding)                     | yes             | yes             |
 | Voice messages                                | yes             | yes             |
-| AMS file attachments (chat-service hosted)    | yes             | yes             |
-| SharePoint/OneDrive file attachments          | -               | yes             |
+| AMS file attachments (chat-service hosted)    | -               | yes             |
+| SharePoint/OneDrive file attachments          | chats only      | yes             |
+| Media captions                                | yes             | yes             |
 | Typing indicators                             | yes             | yes             |
 | Read receipts                                 | yes             | -               |
 | Backfill (history on join)                    | -               | yes             |
 | Backfill attachments + reactions + replies    | -               | yes             |
 | Presence (direct-chat partners, opt-in)       | -               | yes             |
-| Send invites / kick / power level             | -               | -               |
+| Membership changes (add / remove / join)      | yes             | yes             |
+| Chat renames (group and meeting chats)        | yes             | yes             |
+| Power levels / chat roles                     | -               | -               |
 | User profile sync (name, avatar, contact)     | -               | yes             |
 | Directory metadata (job title, dept, phones)  | -               | yes             |
 | DM room topic populated from directory card   | -               | yes             |
@@ -58,6 +61,7 @@ below).
 | Call notices (started / ended / recording)    | -               | yes             |
 | Call join link (click-through to Teams)       | -               | yes             |
 | Call media bridging                           | -               | -               |
+| Teams audio call self-test (`call-test`)      | yes             | -               |
 | End-to-bridge encryption                      | yes             | yes             |
 | End-to-end encryption (Teams side)            | -               | -               |
 
@@ -149,14 +153,26 @@ knobs:
   on Matrix instead of removing the event
 - `presence.send_matrix_typing` / `presence.send_matrix_read_receipts` -
   control which Matrix EDUs propagate to Teams
+- `calls.stun_server` - STUN server the bridge uses to learn its public
+  address for call media (empty offers only the host's own addresses)
+
+## Protocol documentation
+
+`docs/openapi/` holds OpenAPI 3.0 descriptions of both Teams API surfaces:
+`teams-webclient.yaml` for the undocumented web-client endpoints the bridge
+talks to, with every operation citing the code or reference client it comes
+from, and `graph-teams-v1.0.yaml`, a Teams-only cut of Microsoft's official
+Graph v1.0 description, regenerated with
+`docs/openapi/tools/graph-teams-subset.py`.
 
 ## Limitations
 
 - **Call media**: call events render as `m.notice` bubbles with a join link
-  that opens in the Teams client. Bridging the actual call media is out of
-  scope (different SFU stacks, no public SDK). Ad-hoc DM/group call detection
-  requires an additional Trouter `callAgent` registration that's currently
-  a probe.
+  that opens in the Teams client. The bridge can place a Teams audio call and
+  carry its media (`call-test` in the management room checks this end to end
+  against the Teams Echo bot), but joining that audio to a Matrix call
+  (Element Call / MatrixRTC) is not implemented yet. Incoming calls, video
+  and meetings are not bridged.
 - **Voice messages on Teams**: Teams's web/desktop client doesn't have a
   voice-recording feature, so audio sent from Matrix renders as a downloadable
   attachment rather than an inline player on the Teams side.
@@ -164,15 +180,20 @@ knobs:
   `<hex>_<name>` keys, but Teams's renderer only draws bubble graphics for
   emoji that exist in its own catalog. Anything outside the catalog shows as
   the raw hex on the Teams side.
-- **SharePoint uploads from Matrix**: files sent from Teams land on Matrix as
-  native `m.file`/`m.image` attachments (bridge downloads via the SharePoint
-  OAuth token). The reverse direction (uploading a Matrix file into the Teams
-  chat's SharePoint folder) is not implemented; files sent from Matrix go
-  through the AMS pipeline, which Teams renders as a plain attachment.
+- **Files in channels**: files sent from Matrix to a chat are stored in the
+  sender's OneDrive "Microsoft Teams Chat Files" folder and shared with the
+  chat's members, as Teams does. Channels keep their files in the team's
+  SharePoint site instead, which the bridge doesn't upload to yet, so a file
+  sent to a channel portal is refused with a notice.
+- **Ghost ids of non-work accounts**: consumer and Skype users get ghost ids
+  with `:` replaced by `_`, so a Skype name that itself contains `_` can't be
+  mapped back. Work accounts (`8:orgid:`) are unaffected.
 - **Presence and Teams-side read receipts**: Teams availability of your
   direct-chat partners can be mirrored as Matrix presence
   (`presence.sync_teams_presence`, off by default). Group members' presence,
   your own Matrix presence and Teams read state are not bridged.
+- **Power levels**: Teams chat roles (admin/user) are not mapped to Matrix
+  power levels in either direction.
 - **Cross-tenant federation**: starting a chat works only for users your
   Teams tenant can already address (own tenant + accepted federation
   partners). Teams's directory rejects unknown MRIs server-side.
@@ -190,6 +211,13 @@ Issues and PRs welcome on the GitHub repository.
   independent Go reimplementation of that protocol - the endpoints, scopes and
   wire formats are Microsoft's, and purple-teams is what mapped them out.
   Without it this would have taken months to reverse-engineer. Massive thanks.
+- **[ost](https://github.com/eisbaw/ost)** by Mark Ruvald Pedersen - the
+  outgoing Teams call flow (conversation service requests, Trouter callback
+  links, SDES media) that `pkg/msteams/calls.go` and `pkg/teamsmedia`
+  reimplement in Go.
+- **[Squads](https://github.com/IanTerzo/Squads)** and
+  **[teams-cli](https://github.com/fossteams/teams-cli)** - cross-checks for
+  thread creation, member changes and Graph-based downloads of shared files.
 - **[mautrix-slack](https://github.com/mautrix/slack)** by
   [Tulir Asokan](https://github.com/tulir) - the bridge structure
   (NetworkConnector layout, login flows, identifier mapping, double-puppet

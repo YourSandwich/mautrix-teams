@@ -6,9 +6,74 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Teams membership changes (members added, removed, joining or leaving a
+  meeting chat) and chat renames now reach Matrix as they happen instead of
+  at the next restart. Display names announced when a visitor joins a meeting
+  name their ghost.
+- Renaming a group or meeting portal on Matrix renames the Teams chat, and
+  inviting or kicking a Teams user in one adds or removes them on Teams.
+  Leaving a portal on Matrix does not leave the Teams chat. Direct chats and
+  channels no longer advertise renames, and no portal advertises topic
+  changes.
+- Group chat creation from Matrix now works. It was listed as supported but
+  always failed; the created chat is named after the Matrix room name.
+- After Trouter reports lost pushes (it does after every reconnect), the
+  bridge catches up the affected chats through forward backfill instead of
+  losing the messages sent during the gap.
+- `call-test` management command: places a short Teams audio call to the
+  Teams Echo bot (or a named user), plays a test tone and reports whether the
+  call connected, packets each way, and whether the tone came back. It is
+  the first piece of call bridging; see `calls.stun_server` in the example
+  config.
 - Opt-in `presence.sync_teams_presence`: direct-chat partners' Teams
   availability (available, busy, in a call, away, out of office, personal
   note) shows as Matrix presence on their ghosts.
+- OpenAPI 3.0 documentation under `docs/openapi/`: the Teams web-client API
+  the bridge uses, and a reproducible Teams subset of Microsoft Graph v1.0.
+
+### Fixed
+
+- Images and files from Teams failing with
+  `[attachment ... could not be downloaded]`. The skype token is only
+  refreshed lazily by chat-service calls, so on a quiet login it sat expired
+  while Trouter kept delivering messages whose attachments were then fetched
+  with it (`401` from AMS). AMS downloads and uploads now refresh an expired
+  token and retry once on `401`.
+- Files sent from Matrix (for example `.zip` archives) arrived in Teams as a
+  link only the sender could open. Like Teams itself, the bridge now stores
+  them in the sender's OneDrive `Microsoft Teams Chat Files` folder, shares
+  them with the chat's members and posts a file card, with the caption in
+  the same message. Files sent to channel portals are refused with a notice,
+  since channel files live in the team's SharePoint site. Images, video and
+  voice messages uploaded to Teams are readable by the whole conversation
+  instead of only the sender.
+- SharePoint/OneDrive files another user shared in a chat failed with
+  `403 accessDenied`; they are now fetched through Microsoft Graph's shares
+  API when SharePoint refuses them. Skype-style `File.1` attachments are
+  downloaded from their `original` view instead of the bare object URL.
+- Captions on images and files sent from Matrix were used as the file name
+  and never reached Teams. The real file name is uploaded and the caption is
+  sent as the message text.
+- Ghosts of consumer (`8:live:`), Skype and phone users stayed nameless: the
+  tenant directory rejects their ids with `400 InvalidUserId`, which failed
+  the whole profile update. They are now named from the display name Teams
+  sends with their messages.
+- Typing notifications from Teams members the bridge hadn't seen post yet
+  failed with `M_FORBIDDEN`; their ghost now joins the portal first.
+- The Trouter endpoint id is kept across restarts, so repeated restarts no
+  longer accumulate endpoints on the account, and reconnects refresh expired
+  tokens before re-registering.
+- Trouter event frames are acknowledged; ost reports that Trouter keeps
+  retrying unacknowledged ones.
+
+### Security
+
+- Downloading images from Teams messages no longer sends the user's skype
+  token to whatever host the image URL names. Sticker and Giphy images can
+  point at third-party hosts; the token now only goes to Teams media hosts.
+
 ### Changed
 
 - Bumped mautrix-go from `v0.28.1` to `v0.31.0` and refreshed dependencies
@@ -16,7 +81,11 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   `mattn/go-sqlite3` `v1.14.52`, the `golang.org/x/*` line). No bridge code
   changes were needed for the bump itself; new bridgev2 options (login
   connect wait, transient-disconnect debounce) arrive through the regular
-  config upgrade.
+  config upgrade. Built with Go 1.27, the first start marks the bridge's
+  Olm one-time keys for a one-off repair (mautrix-go's fix for a jsonv2
+  encoding bug).
+- New dependencies for call media: `pion/ice`, `pion/srtp`, `pion/rtp`,
+  `pion/rtcp` and `pion/stun` (pure Go).
 
 ## [28.1] - 2026-06-17
 
