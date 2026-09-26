@@ -125,10 +125,23 @@ func TestClassifyChat(t *testing.T) {
 	}
 }
 
+func TestPeersFromEchoThread(t *testing.T) {
+	const me = "8:orgid:11111111-1111-1111-1111-111111111111"
+	if got, want := peersFromThreadID(EchoThreadID(me)), []string{me, EchoBotMRI}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestFetchShortProfilesSkipsNonDirectoryMRIs(t *testing.T) {
-	var sent []string
+	sent := map[string][]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&sent)
+		var mris []string
+		_ = json.NewDecoder(r.Body).Decode(&mris)
+		sent[r.URL.Path] = mris
+		if r.URL.Path == "/beta/users/fetch" {
+			_, _ = w.Write([]byte(`{"value":[{"mri":"28:bot","displayName":"Echo","type":"BOT"}]}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"value":[]}`))
 	}))
 	t.Cleanup(srv.Close)
@@ -144,11 +157,15 @@ func TestFetchShortProfilesSkipsNonDirectoryMRIs(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 
 	in := []string{"8:orgid:a", "8:live:.cid.0123456789abcdef", "8:jane.doe", "4:+4312345", "28:bot"}
-	if _, err := c.FetchShortProfiles(context.Background(), in); err != nil {
+	users, err := c.FetchShortProfiles(context.Background(), in)
+	if err != nil {
 		t.Fatalf("FetchShortProfiles: %v", err)
 	}
-	if want := []string{"8:orgid:a", "28:bot"}; !slices.Equal(sent, want) {
-		t.Errorf("sent %v, want %v", sent, want)
+	if !slices.Equal(sent["/beta/users/fetchShortProfile"], []string{"8:orgid:a"}) || !slices.Equal(sent["/beta/users/fetch"], []string{"28:bot"}) {
+		t.Errorf("sent %v", sent)
+	}
+	if len(users) != 1 || users[0].DisplayName != "Echo" {
+		t.Errorf("users = %+v", users)
 	}
 	if in[1] != "8:live:.cid.0123456789abcdef" {
 		t.Error("caller's slice was modified")
