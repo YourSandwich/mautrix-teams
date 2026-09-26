@@ -327,6 +327,10 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 			c.handleTrouterRequest(ctx, conn, payload)
 		}
 	case '5':
+		// Trouter redelivers event frames that aren't acked.
+		if id := socketIOAckID(frame); id != "" {
+			_ = conn.Write(ctx, websocket.MessageText, []byte("6:"+id+"::"))
+		}
 		if payload := payloadAfter3Colons(frame); payload != nil {
 			c.handleTrouterEvent(payload)
 		}
@@ -334,6 +338,23 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 	default:
 		c.log.Debug().Str("frame_prefix", string(frame[:1])).Int("len", len(frame)).Msg("Trouter: unknown frame")
 	}
+}
+
+func socketIOAckID(frame []byte) string {
+	rest, ok := bytes.CutPrefix(frame, []byte("5:"))
+	if !ok {
+		return ""
+	}
+	id, _, ok := bytes.Cut(rest, []byte(":"))
+	if !ok || len(id) == 0 {
+		return ""
+	}
+	for _, b := range id {
+		if b < '0' || b > '9' {
+			return ""
+		}
+	}
+	return string(id)
 }
 
 // payloadAfter3Colons returns the bytes after the third ':' in a socket.io

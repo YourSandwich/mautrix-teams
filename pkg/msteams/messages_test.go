@@ -448,3 +448,17 @@ func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
 		}
 	}
 }
+
+func TestSocketIOAckID(t *testing.T) {
+	for frame, want := range map[string]string{
+		`5:12::{"name":"trouter.message_loss"}`: "12",
+		`5:3+::{"name":"trouter.message_loss"}`: "",
+		`5:::{"name":"trouter.message_loss"}`:   "",
+		`3:::{"id":1}`:                          "",
+		`5:7`:                                   "",
+	} {
+		if got := socketIOAckID([]byte(frame)); got != want {
+			t.Errorf("socketIOAckID(%q) = %q, want %q", frame, got, want)
+		}
+	}
+}
