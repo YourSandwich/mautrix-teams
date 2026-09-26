@@ -105,6 +105,9 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 		Int("queued", queued).
 		Interface("skipped", skipped).
 		Msg("Synced chats from Teams")
+	if cfg.Presence.SyncTeamsPresence {
+		t.subscribePresence(ctx, chats)
+	}
 }
 
 // bridgev2 forward-backfills only the portals whose last bridged message is

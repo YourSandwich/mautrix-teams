@@ -77,6 +77,7 @@ type BackfillConfig struct {
 type PresenceConfig struct {
 	SendMatrixTyping       *bool `yaml:"send_matrix_typing"`
 	SendMatrixReadReceipts *bool `yaml:"send_matrix_read_receipts"`
+	SyncTeamsPresence      bool  `yaml:"sync_teams_presence"`
 }
 
 // ShouldSyncMeetingChats reports whether ad-hoc meeting chats should be
@@ -192,6 +193,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "backfill", "enabled")
 	helper.Copy(up.Bool, "presence", "send_matrix_typing")
 	helper.Copy(up.Bool, "presence", "send_matrix_read_receipts")
+	helper.Copy(up.Bool, "presence", "sync_teams_presence")
 	helper.Copy(up.Str, "endpoints", "chat_svc")
 	helper.Copy(up.Str, "endpoints", "auth_svc")
 	helper.Copy(up.Str, "endpoints", "mt")

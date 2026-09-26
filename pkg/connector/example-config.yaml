@@ -39,6 +39,10 @@ backfill:
 presence:
     send_matrix_typing: true
     send_matrix_read_receipts: true
+    # Show direct-chat partners' Teams availability (available, busy, away,
+    # in a call...) as Matrix presence on their ghosts. Needs presence enabled
+    # on the homeserver; off by default because every change is a write there.
+    sync_teams_presence: false
 
 # Override Teams API endpoints. Leave empty to use the commercial-cloud defaults.
 endpoints:

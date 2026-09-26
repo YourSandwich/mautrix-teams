@@ -90,6 +90,7 @@ type Client struct {
 	amsBase              string
 	delveBase            string
 	calling              callingEndpoints
+	presenceBase         string
 	mySiteURL            string
 
 	tokenLock      sync.RWMutex
@@ -100,6 +101,7 @@ type Client struct {
 	delveAuth      *Token
 	graphAuth      *Token
 	ic3Auth        *Token
+	presenceAuth   *Token
 	sharePointAuth map[string]*Token
 	refresh        string
 
@@ -140,6 +142,10 @@ type Client struct {
 	recentRing   map[string]time.Time
 
 	callsByEndpoint sync.Map
+
+	presenceLock  sync.Mutex
+	presenceSubs  map[string]struct{}
+	presenceEtags map[string]string
 }
 
 // sentMessageTTL only needs to outlast the Trouter echo round-trip (seconds,

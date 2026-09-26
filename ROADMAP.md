@@ -65,7 +65,8 @@ as a downloadable attachment rather than an inline player.
 - [x] Thread backfill (replies + parent carried through the shared convert path).
 - [ ] Adaptive card rendering.
 - [ ] Custom emoji round-trip (non-catalog emoji show as raw hex on Teams).
-- [ ] Teams -> Matrix read receipts and presence.
+- [x] Teams -> Matrix presence for direct-chat partners (opt-in).
+- [ ] Teams -> Matrix read receipts.
 - [ ] Channel read-only mode.
 
 ## Non-goals

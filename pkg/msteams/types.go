@@ -159,6 +159,7 @@ type Event struct {
 	TypingFrom string
 	TypingStop bool
 	ChatUpdate *ChatUpdate
+	Presence   *Presence
 }
 
 type ChatUpdate struct {
