@@ -180,11 +180,12 @@ func (t *TeamsClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 	for _, p := range params.Participants {
 		mris = append(mris, teamsid.ParseUserID(p))
 	}
-	topic := ""
-	if params.Topic != nil {
-		topic = params.Topic.Topic
+	// A Teams chat's "topic" is its name; nothing maps to a Matrix topic.
+	name := ""
+	if params.Name != nil {
+		name = params.Name.Name
 	}
-	chat, err := t.Client.CreateGroupChat(ctx, topic, mris)
+	chat, err := t.Client.CreateGroupChat(ctx, name, mris)
 	if err != nil {
 		return nil, err
 	}

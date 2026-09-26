@@ -38,31 +38,36 @@ const (
 // allowed: if the server rejects the cached token we refresh and try again
 // once. body and out may both be nil.
 func (c *Client) doJSON(ctx context.Context, method, url string, auth AuthKind, body, out any) error {
-	if err := c.ensureFreshTokens(ctx, auth == AuthBearer, auth == AuthSkype || auth == AuthRegistration); err != nil {
-		return err
-	}
-	err := c.sendJSON(ctx, method, url, auth, body, out)
-	if errors.Is(err, ErrTokenExpired) && auth != AuthNone {
-		if rerr := c.reauth(ctx, auth); rerr != nil {
-			return fmt.Errorf("reauth after 401: %w", rerr)
-		}
-		return c.sendJSON(ctx, method, url, auth, body, out)
-	}
+	_, err := c.doJSONHeaders(ctx, method, url, auth, body, out)
 	return err
 }
 
-func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind, body, out any) error {
+func (c *Client) doJSONHeaders(ctx context.Context, method, url string, auth AuthKind, body, out any) (http.Header, error) {
+	if err := c.ensureFreshTokens(ctx, auth == AuthBearer, auth == AuthSkype || auth == AuthRegistration); err != nil {
+		return nil, err
+	}
+	hdr, err := c.sendJSON(ctx, method, url, auth, body, out)
+	if errors.Is(err, ErrTokenExpired) && auth != AuthNone {
+		if rerr := c.reauth(ctx, auth); rerr != nil {
+			return nil, fmt.Errorf("reauth after 401: %w", rerr)
+		}
+		return c.sendJSON(ctx, method, url, auth, body, out)
+	}
+	return hdr, err
+}
+
+func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind, body, out any) (http.Header, error) {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
+			return nil, fmt.Errorf("marshal request: %w", err)
 		}
 		rdr = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
 	if body != nil {
@@ -70,40 +75,45 @@ func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind
 	}
 	req.Header.Set("Accept", "application/json")
 	if err := c.attachAuth(req, auth); err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 401")
-		return ErrTokenExpired
+		return nil, ErrTokenExpired
 	case resp.StatusCode == http.StatusTooManyRequests:
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 429")
-		return ErrRateLimited
+		return nil, ErrRateLimited
 	case resp.StatusCode == http.StatusForbidden:
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 403")
-		return ErrForbidden
+		return nil, ErrForbidden
 	case resp.StatusCode == http.StatusNotFound:
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 404")
-		return ErrNotFound
+		return nil, ErrNotFound
 	case resp.StatusCode >= 400:
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		c.log.Debug().
 			Str("method", method).Str("url", url).
 			Int("status", resp.StatusCode).Bytes("body", data).
 			Msg("Teams API: error")
-		return fmt.Errorf("msteams: %s %s: %d %s", method, url, resp.StatusCode, string(data))
+		return nil, fmt.Errorf("msteams: %s %s: %d %s", method, url, resp.StatusCode, string(data))
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
+		return resp.Header, nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	err = json.NewDecoder(resp.Body).Decode(out)
+	bodiless := resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusNoContent
+	if err != nil && !(bodiless && errors.Is(err, io.EOF)) {
+		return nil, err
+	}
+	return resp.Header, nil
 }
 
 // reauth runs the token refresh appropriate for the kind of auth that just

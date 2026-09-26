@@ -42,6 +42,8 @@ var (
 	_ bridgev2.ReactionHandlingNetworkAPI    = (*TeamsClient)(nil)
 	_ bridgev2.ReadReceiptHandlingNetworkAPI = (*TeamsClient)(nil)
 	_ bridgev2.TypingHandlingNetworkAPI      = (*TeamsClient)(nil)
+	_ bridgev2.RoomNameHandlingNetworkAPI    = (*TeamsClient)(nil)
+	_ bridgev2.MembershipHandlingNetworkAPI  = (*TeamsClient)(nil)
 )
 
 func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
@@ -292,6 +294,45 @@ func (t *TeamsClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matr
 		return nil
 	}
 	return t.Client.SendTyping(ctx, threadID)
+}
+
+func (t *TeamsClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.MatrixRoomName) (bool, error) {
+	threadID := teamsid.ParsePortalID(msg.Portal.ID)
+	if !isGroupThread(threadID) {
+		return false, bridgev2.ErrRoomMetadataNotSupported
+	}
+	if err := t.Client.SetTopic(ctx, threadID, msg.Content.Name); err != nil {
+		return false, err
+	}
+	// Stored as the Teams echo will render it, so the echo isn't a second rename.
+	msg.Portal.Name = t.Main.Config.FormatChatName(&msteams.Chat{
+		ID:    threadID,
+		Type:  msteams.ChatTypeForID(threadID),
+		Topic: msg.Content.Name,
+	})
+	msg.Portal.NameSet = true
+	return true, nil
+}
+
+// The user's own leave isn't bridged: leaving a room to tidy the room list
+// must not leave the Teams chat.
+func (t *TeamsClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
+	ghost, ok := msg.Target.(*bridgev2.Ghost)
+	if !ok {
+		return nil, nil
+	}
+	threadID := teamsid.ParsePortalID(msg.Portal.ID)
+	if !isGroupThread(threadID) {
+		return nil, bridgev2.ErrMembershipNotSupported
+	}
+	mri := teamsid.ParseUserID(ghost.ID)
+	switch msg.Type {
+	case bridgev2.Invite:
+		return nil, t.Client.AddMember(ctx, threadID, mri)
+	case bridgev2.Kick, bridgev2.RevokeInvite:
+		return nil, t.Client.RemoveMember(ctx, threadID, mri)
+	}
+	return nil, bridgev2.ErrMembershipNotSupported
 }
 
 // matrixContentToTeams returns (body, contentType, mentions) for an outbound

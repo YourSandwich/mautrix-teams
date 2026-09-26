@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -429,6 +430,39 @@ func TestTrouterMessageLossSignalsResync(t *testing.T) {
 	case <-c.ResyncNeeded():
 		t.Error("a burst must coalesce into one pending signal")
 	default:
+	}
+}
+
+func TestParseThreadActivity(t *testing.T) {
+	c := newClientAt(t, "http://unused")
+	add := c.parseThreadActivity("ThreadActivity/AddMember",
+		`<addmember><eventtime>1790000000000</eventtime><initiator>8:orgid:a</initiator><target>8:orgid:b</target><target>8:orgid:c</target></addmember>`)
+	if add == nil || add.Initiator != "8:orgid:a" || !slices.Equal(add.Joined, []string{"8:orgid:b", "8:orgid:c"}) || add.Topic != nil {
+		t.Errorf("AddMember = %+v", add)
+	}
+	del := c.parseThreadActivity("ThreadActivity/DeleteMember",
+		`<deletemember><initiator>8:orgid:a</initiator><target>8:orgid:b</target></deletemember>`)
+	if del == nil || !slices.Equal(del.Left, []string{"8:orgid:b"}) || len(del.Joined) != 0 {
+		t.Errorf("DeleteMember = %+v", del)
+	}
+	topic := c.parseThreadActivity("ThreadActivity/TopicUpdate",
+		`<topicupdate><initiator>8:orgid:a</initiator><value>Q4 &amp; planning</value></topicupdate>`)
+	if topic == nil || topic.Topic == nil || *topic.Topic != "Q4 & planning" {
+		t.Errorf("TopicUpdate = %+v", topic)
+	}
+	joined := c.parseThreadActivity("ThreadActivity/MemberJoined",
+		`{"members":[{"id":"8:teamsvisitor:x","friendlyname":"Guest Gary"},{"id":"8:orgid:d","friendlyname":"orgid:d"}]}`)
+	if joined == nil || !slices.Equal(joined.Joined, []string{"8:teamsvisitor:x", "8:orgid:d"}) {
+		t.Errorf("MemberJoined = %+v", joined)
+	}
+	if got := c.CachedDisplayName("8:teamsvisitor:x"); got != "Guest Gary" {
+		t.Errorf("visitor name cached as %q", got)
+	}
+	if got := c.CachedDisplayName("8:orgid:d"); got != "" {
+		t.Errorf("unresolved orgid name should not be cached, got %q", got)
+	}
+	if c.parseThreadActivity("ThreadActivity/CallStarted", "<x/>") != nil {
+		t.Error("call activity must not parse as a chat update")
 	}
 }
 

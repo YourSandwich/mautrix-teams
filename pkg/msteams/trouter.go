@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -681,6 +682,11 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	}
 	threadID := teamsThreadFromURL(r.ConversationLink)
 	parentID := parentMessageIDFromURL(r.ConversationLink)
+	// Roster and topic activity is sent by the thread itself, not by a user.
+	if upd := c.parseThreadActivity(r.MessageType, r.Content); upd != nil && threadID != "" {
+		c.emit(Event{Type: EventTypeChatUpdate, ThreadID: threadID, Timestamp: ParseTeamsTime(r.ComposeTime), ChatUpdate: upd}, "")
+		return
+	}
 	fromMRI := teamsMRIFromURL(r.From)
 	if threadID == "" || fromMRI == "" {
 		c.log.Debug().Str("conv", r.ConversationLink).Str("from", r.From).Msg("Trouter: unparseable thread/from")
@@ -771,6 +777,57 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 			ParentID:    parentID,
 		},
 	}, r.IMDisplayName)
+}
+
+func (c *Client) parseThreadActivity(messageType, content string) *ChatUpdate {
+	switch messageType {
+	case "ThreadActivity/AddMember", "ThreadActivity/DeleteMember", "ThreadActivity/TopicUpdate":
+		var blob struct {
+			Initiator string   `xml:"initiator"`
+			Targets   []string `xml:"target"`
+			Value     string   `xml:"value"`
+		}
+		if err := xml.Unmarshal([]byte(content), &blob); err != nil {
+			c.log.Debug().Err(err).Str("message_type", messageType).Msg("Trouter: bad ThreadActivity XML")
+			return nil
+		}
+		upd := &ChatUpdate{Initiator: blob.Initiator}
+		switch messageType {
+		case "ThreadActivity/AddMember":
+			upd.Joined = blob.Targets
+		case "ThreadActivity/DeleteMember":
+			upd.Left = blob.Targets
+		default:
+			upd.Topic = &blob.Value
+		}
+		return upd
+	case "ThreadActivity/MemberJoined", "ThreadActivity/MemberLeft":
+		var info struct {
+			Members []struct {
+				ID           string `json:"id"`
+				FriendlyName string `json:"friendlyname"`
+			} `json:"members"`
+		}
+		if err := json.Unmarshal([]byte(content), &info); err != nil {
+			c.log.Debug().Err(err).Str("message_type", messageType).Msg("Trouter: bad ThreadActivity JSON")
+			return nil
+		}
+		ids := make([]string, 0, len(info.Members))
+		for _, m := range info.Members {
+			if m.ID == "" {
+				continue
+			}
+			ids = append(ids, m.ID)
+			if !strings.HasPrefix(m.FriendlyName, "orgid:") {
+				c.CacheDisplayName(m.ID, m.FriendlyName)
+			}
+		}
+		if messageType == "ThreadActivity/MemberJoined" {
+			return &ChatUpdate{Joined: ids}
+		}
+		return &ChatUpdate{Left: ids}
+	}
+	return nil
 }
 
 // 48:calllogs / 48:notifications are virtual threads (/v1/threads returns 400);

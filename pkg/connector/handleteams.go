@@ -64,7 +64,9 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 			return
 		}
 		t.queueMessageEvent(ctx, ev, false)
-	case msteams.EventTypeReadReceipt, msteams.EventTypeChatUpdate, msteams.EventTypePresence:
+	case msteams.EventTypeChatUpdate:
+		t.queueChatUpdate(ev)
+	case msteams.EventTypeReadReceipt, msteams.EventTypePresence:
 		log.Trace().Msg("Event not yet implemented")
 	default:
 		log.Debug().Msg("Ignoring unknown event type")
@@ -107,6 +109,69 @@ func (t *TeamsClient) queueReactionSync(ev msteams.Event) {
 		TargetMessage: targetID,
 		Reactions:     &bridgev2.ReactionSyncData{Users: users, HasAllUsers: true},
 	})
+}
+
+func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
+	upd := ev.ChatUpdate
+	if upd == nil || ev.ThreadID == "" {
+		return
+	}
+	portalKey := teamsid.MakePortalKey(ev.ThreadID, t.UserLogin.ID, t.splitPortals())
+	change := &bridgev2.ChatInfoChange{}
+	switch {
+	case upd.Topic == nil:
+	case *upd.Topic == "":
+		// A cleared topic falls back to a name built from the roster, which
+		// needs a fresh fetch of the chat.
+		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+			EventMeta:       simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portalKey},
+			GetChatInfoFunc: t.GetChatInfo,
+		})
+	default:
+		name := t.Main.Config.FormatChatName(&msteams.Chat{
+			ID:    ev.ThreadID,
+			Type:  msteams.ChatTypeForID(ev.ThreadID),
+			Topic: *upd.Topic,
+		})
+		change.ChatInfo = &bridgev2.ChatInfo{Name: &name}
+	}
+	if change.ChatInfo == nil && len(upd.Joined)+len(upd.Left) == 0 {
+		return
+	}
+	if len(upd.Joined)+len(upd.Left) > 0 {
+		members := make(bridgev2.ChatMemberMap, len(upd.Joined)+len(upd.Left))
+		for _, mri := range upd.Joined {
+			members.Set(t.chatMember(mri, event.MembershipJoin))
+		}
+		for _, mri := range upd.Left {
+			members.Set(t.chatMember(mri, event.MembershipLeave))
+		}
+		change.MemberChanges = &bridgev2.ChatMemberList{MemberMap: members}
+	}
+	var sender bridgev2.EventSender
+	if upd.Initiator != "" {
+		sender = bridgev2.EventSender{
+			Sender:   teamsid.MakeUserID(upd.Initiator),
+			IsFromMe: upd.Initiator == t.UserMRI,
+		}
+	}
+	t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatInfoChange{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatInfoChange,
+			PortalKey: portalKey,
+			Sender:    sender,
+			Timestamp: ev.Timestamp,
+		},
+		ChatInfoChange: change,
+	})
+}
+
+func (t *TeamsClient) chatMember(mri string, membership event.Membership) bridgev2.ChatMember {
+	uid := teamsid.MakeUserID(mri)
+	return bridgev2.ChatMember{
+		EventSender: bridgev2.EventSender{Sender: uid, IsFromMe: mri == t.UserMRI},
+		Membership:  membership,
+	}
 }
 
 func (t *TeamsClient) convertSharedFiles(

@@ -134,3 +134,18 @@ func TestDoJSONHappyPath(t *testing.T) {
 		t.Errorf("body not sent correctly: %s", bodyCapture)
 	}
 }
+
+func TestDoJSONEmptyBody(t *testing.T) {
+	for status, wantErr := range map[int]bool{http.StatusOK: true, http.StatusCreated: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		c := newTestClient(t)
+		var out struct{ ID string }
+		err := c.doJSON(context.Background(), "GET", srv.URL, AuthNone, nil, &out)
+		if (err != nil) != wantErr {
+			t.Errorf("empty %d body: err = %v, want error %v", status, err, wantErr)
+		}
+		srv.Close()
+	}
+}

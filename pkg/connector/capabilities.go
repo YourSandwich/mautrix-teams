@@ -18,9 +18,12 @@ package connector
 
 import (
 	"context"
+	"strings"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
+
+	"go.mau.fi/mautrix-teams/pkg/teamsid"
 )
 
 const (
@@ -50,8 +53,8 @@ func (tc *TeamsConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities
 	}
 }
 
+// No ID: GetID derives one from a hash of the features.
 var roomCaps = &event.RoomFeatures{
-	ID: "fi.mau.teams.capabilities.2026_04_21",
 	Formatting: event.FormattingFeatureMap{
 		event.FmtBold:          event.CapLevelFullySupported,
 		event.FmtItalic:        event.CapLevelFullySupported,
@@ -104,10 +107,6 @@ var roomCaps = &event.RoomFeatures{
 			MaxSize: MaxFileSize,
 		},
 	},
-	State: event.StateFeatureMap{
-		event.StateRoomName.Type: {Level: event.CapLevelFullySupported},
-		event.StateTopic.Type:    {Level: event.CapLevelFullySupported},
-	},
 	LocationMessage: event.CapLevelRejected,
 	MaxTextLength:   MaxTextLength,
 	Thread:          event.CapLevelFullySupported,
@@ -116,6 +115,25 @@ var roomCaps = &event.RoomFeatures{
 	Reaction:        event.CapLevelFullySupported,
 }
 
+var groupRoomCaps = func() *event.RoomFeatures {
+	caps := roomCaps.Clone()
+	caps.State = event.StateFeatureMap{
+		event.StateRoomName.Type: {Level: event.CapLevelFullySupported},
+	}
+	caps.MemberActions = event.MemberFeatureMap{
+		event.MemberActionInvite: event.CapLevelFullySupported,
+		event.MemberActionKick:   event.CapLevelFullySupported,
+	}
+	return caps
+}()
+
 func (t *TeamsClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	if isGroupThread(teamsid.ParsePortalID(portal.ID)) {
+		return groupRoomCaps
+	}
 	return roomCaps
+}
+
+func isGroupThread(threadID string) bool {
+	return strings.HasSuffix(threadID, "@thread.v2")
 }

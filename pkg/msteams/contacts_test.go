@@ -157,3 +157,81 @@ func TestFetchShortProfilesSkipsNonDirectoryMRIs(t *testing.T) {
 		t.Errorf("GetUser(consumer) = %v, want ErrNotFound", err)
 	}
 }
+
+func TestCreateGroupChat(t *testing.T) {
+	var created struct {
+		Members []struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"members"`
+		Properties map[string]string `json:"properties"`
+	}
+	var topicBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/threads":
+			_ = json.NewDecoder(r.Body).Decode(&created)
+			w.Header().Set("Location", "https://at.ng.msg.teams.microsoft.com/v1/threads/19:new%40thread.v2")
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == "PUT" && r.URL.Path == "/v1/threads/19:new@thread.v2/properties" && r.URL.Query().Get("name") == "topic":
+			_ = json.NewDecoder(r.Body).Decode(&topicBody)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+
+	chat, err := c.CreateGroupChat(context.Background(), "Offsite", []string{"8:orgid:a", "8:orgid:me", "8:orgid:b"})
+	if err != nil {
+		t.Fatalf("CreateGroupChat: %v", err)
+	}
+	if chat.ID != "19:new@thread.v2" || chat.Topic != "Offsite" || len(chat.Members) != 3 {
+		t.Errorf("chat = %+v", chat)
+	}
+	if len(created.Members) != 3 || created.Members[0].ID != "8:orgid:me" || created.Members[0].Role != "Admin" || created.Members[1].Role != "User" {
+		t.Errorf("create body members = %+v", created.Members)
+	}
+	if created.Properties["threadType"] != "chat" {
+		t.Errorf("create body properties = %v", created.Properties)
+	}
+	if topicBody["topic"] != "Offsite" {
+		t.Errorf("topic body = %v", topicBody)
+	}
+}
+
+func TestCreateGroupChatIDFromRedirectedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			http.Redirect(w, r, "/v1/threads/19:new@thread.v2", http.StatusSeeOther)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"19:new@thread.v2"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	chat, err := c.CreateGroupChat(context.Background(), "", []string{"8:orgid:a"})
+	if err != nil || chat.ID != "19:new@thread.v2" {
+		t.Fatalf("chat=%+v err=%v", chat, err)
+	}
+}
+
+func TestThreadMemberOps(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.EscapedPath())
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	if err := c.AddMember(context.Background(), "19:x@thread.v2", "8:orgid:a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveMember(context.Background(), "19:x@thread.v2", "8:orgid:a"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"PUT /v1/threads/19:x@thread.v2/members/8:orgid:a", "DELETE /v1/threads/19:x@thread.v2/members/8:orgid:a"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

@@ -753,7 +753,75 @@ func (c *Client) StartOneOnOne(ctx context.Context, targetMRI string) (*Chat, er
 }
 
 func (c *Client) CreateGroupChat(ctx context.Context, topic string, members []string) (*Chat, error) {
-	return nil, ErrNotImplemented
+	type member struct {
+		ID   string `json:"id"`
+		Role string `json:"role"`
+	}
+	body := struct {
+		Members    []member          `json:"members"`
+		Properties map[string]string `json:"properties"`
+	}{
+		Members:    []member{{ID: c.cfg.UserMRI, Role: "Admin"}},
+		Properties: map[string]string{"threadType": "chat", "chatFilesIndexId": "2"},
+	}
+	chat := &Chat{Type: ChatTypeGroup, Members: []Member{{MRI: c.cfg.UserMRI, Role: "Admin"}}}
+	for _, mri := range members {
+		if mri != c.cfg.UserMRI {
+			body.Members = append(body.Members, member{ID: mri, Role: "User"})
+			chat.Members = append(chat.Members, Member{MRI: mri})
+		}
+	}
+	// The id comes in Location on a 201, or in the body of the thread a
+	// redirect leads to.
+	var created struct {
+		ID string `json:"id"`
+	}
+	hdr, err := c.doJSONHeaders(ctx, "POST", c.chatSvcBaseURL()+"/v1/threads", AuthSkype, body, &created)
+	if err != nil {
+		return nil, fmt.Errorf("create thread: %w", err)
+	}
+	chat.ID = firstNonEmpty(threadIDFromLocation(hdr.Get("Location")), created.ID)
+	if chat.ID == "" {
+		return nil, fmt.Errorf("create thread: no thread id in response")
+	}
+	if topic != "" {
+		if err := c.SetTopic(ctx, chat.ID, topic); err != nil {
+			c.log.Warn().Err(err).Str("thread", chat.ID).Msg("Created group chat but failed to name it")
+		} else {
+			chat.Topic = topic
+		}
+	}
+	return chat, nil
+}
+
+func threadIDFromLocation(location string) string {
+	_, id, ok := strings.Cut(location, "/v1/threads/")
+	if !ok {
+		return ""
+	}
+	id, _, _ = strings.Cut(id, "?")
+	unescaped, err := url.PathUnescape(id)
+	if err != nil {
+		return ""
+	}
+	return unescaped
+}
+
+func (c *Client) SetTopic(ctx context.Context, threadID, topic string) error {
+	endpoint := c.chatSvcBaseURL() + "/v1/threads/" + url.PathEscape(threadID) + "/properties?name=topic"
+	return c.doJSON(ctx, "PUT", endpoint, AuthSkype, map[string]string{"topic": topic}, nil)
+}
+
+func (c *Client) AddMember(ctx context.Context, threadID, mri string) error {
+	return c.doJSON(ctx, "PUT", c.threadMemberURL(threadID, mri), AuthSkype, map[string]string{"role": "User"}, nil)
+}
+
+func (c *Client) RemoveMember(ctx context.Context, threadID, mri string) error {
+	return c.doJSON(ctx, "DELETE", c.threadMemberURL(threadID, mri), AuthSkype, nil, nil)
+}
+
+func (c *Client) threadMemberURL(threadID, mri string) string {
+	return c.chatSvcBaseURL() + "/v1/threads/" + url.PathEscape(threadID) + "/members/" + url.PathEscape(mri)
 }
 
 func convertRawConversation(r *rawConversation) Chat {
@@ -824,18 +892,27 @@ func meetingSubject(p *rawThreadProps) string {
 	return m.Subject
 }
 
-func classifyChat(r *rawConversation) ChatType {
-	if strings.HasSuffix(r.ID, "@thread.tacv2") {
+func ChatTypeForID(id string) ChatType {
+	switch {
+	case strings.HasSuffix(id, "@thread.tacv2"):
 		return ChatTypeChannel
+	case strings.HasPrefix(id, "19:meeting_"):
+		return ChatTypeMeeting
+	case strings.HasPrefix(id, "8:"):
+		return ChatType1on1
+	}
+	return ChatTypeGroup
+}
+
+func classifyChat(r *rawConversation) ChatType {
+	if byID := ChatTypeForID(r.ID); byID != ChatTypeGroup {
+		return byID
 	}
 	if strings.HasSuffix(r.ID, "@thread.v2") {
-		if isMeeting(&r.ThreadProperties) || isMeeting(&r.Properties) || strings.HasPrefix(r.ID, "19:meeting_") {
+		if isMeeting(&r.ThreadProperties) || isMeeting(&r.Properties) {
 			return ChatTypeMeeting
 		}
 		return ChatTypeGroup
-	}
-	if strings.HasPrefix(r.ID, "8:") {
-		return ChatType1on1
 	}
 	if r.ThreadProperties.UniqueRosterThread == "true" || r.ThreadProperties.ProductThreadType == "OneToOneChat" {
 		return ChatType1on1
