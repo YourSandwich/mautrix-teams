@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -281,7 +282,14 @@ func (c *Client) CurrentTenantName(ctx context.Context) string {
 	return tenants[0].DisplayName
 }
 
+// fetchShortProfile rejects consumer, Skype and phone ids with 400
+// InvalidUserId, failing the whole batch.
+func directoryMRI(mri string) bool {
+	return strings.HasPrefix(mri, "8:orgid:") || strings.HasPrefix(mri, "28:")
+}
+
 func (c *Client) FetchShortProfiles(ctx context.Context, mris []string) ([]User, error) {
+	mris = slices.DeleteFunc(slices.Clone(mris), func(mri string) bool { return !directoryMRI(mri) })
 	if len(mris) == 0 {
 		return nil, nil
 	}
@@ -304,6 +312,9 @@ func (c *Client) FetchShortProfiles(ctx context.Context, mris []string) ([]User,
 func (c *Client) GetUser(ctx context.Context, mri string) (*User, error) {
 	if mri == "" {
 		return nil, fmt.Errorf("empty mri")
+	}
+	if !directoryMRI(mri) {
+		return nil, ErrNotFound
 	}
 	users, err := c.FetchShortProfiles(ctx, []string{mri})
 	if err != nil {

@@ -17,8 +17,11 @@ package msteams
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -119,5 +122,38 @@ func TestClassifyChat(t *testing.T) {
 		if got := classifyChat(&tc.r); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestFetchShortProfilesSkipsNonDirectoryMRIs(t *testing.T) {
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(ClientConfig{
+		UserMRI:   "8:orgid:me",
+		AuthToken: "aad",
+		Endpoints: Endpoints{MTBase: srv.URL},
+		Logger:    zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	in := []string{"8:orgid:a", "8:live:.cid.0123456789abcdef", "8:jane.doe", "4:+4312345", "28:bot"}
+	if _, err := c.FetchShortProfiles(context.Background(), in); err != nil {
+		t.Fatalf("FetchShortProfiles: %v", err)
+	}
+	if want := []string{"8:orgid:a", "28:bot"}; !slices.Equal(sent, want) {
+		t.Errorf("sent %v, want %v", sent, want)
+	}
+	if in[1] != "8:live:.cid.0123456789abcdef" {
+		t.Error("caller's slice was modified")
+	}
+	if _, err := c.GetUser(context.Background(), "8:live:.cid.abc"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetUser(consumer) = %v, want ErrNotFound", err)
 	}
 }
