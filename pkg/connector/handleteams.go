@@ -275,8 +275,11 @@ func callDuration(cl *msteams.CallLog) string {
 }
 
 func stripMRIPrefix(mri string) string {
-	if strings.HasPrefix(mri, "8:orgid:") {
-		return mri[len("8:orgid:"):]
+	if id, ok := strings.CutPrefix(mri, "8:orgid:"); ok {
+		return id
+	}
+	if _, id, ok := strings.Cut(mri, ":"); ok {
+		return id
 	}
 	return mri
 }
