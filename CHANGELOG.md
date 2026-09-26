@@ -67,6 +67,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   tokens before re-registering.
 - Trouter event frames are acknowledged; ost reports that Trouter keeps
   retrying unacknowledged ones.
+- Catching up a chat after a restart re-downloaded the media of its recent
+  messages and uploaded it to the homeserver again, only to drop the messages
+  as already bridged. Forward backfill now stops at the newest bridged
+  message before converting anything.
 
 ### Security
 

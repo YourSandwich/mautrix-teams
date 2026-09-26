@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -44,6 +45,7 @@ func (t *TeamsClient) FetchMessages(ctx context.Context, params bridgev2.FetchMe
 	// we loop Teams's 200-per-page limit ourselves. Convert inline so skipped
 	// messages don't count against target.
 	cursor := string(params.Cursor)
+	newestBridged := newestBridgedSeq(params)
 	hasMore := false
 	var newestFirst []*bridgev2.BackfillMessage
 	for len(newestFirst) < target {
@@ -58,12 +60,18 @@ func (t *TeamsClient) FetchMessages(ctx context.Context, params bridgev2.FetchMe
 			}
 			return nil, err
 		}
+		reachedBridged := false
 		for i := range result.Messages {
-			if bm := t.wrapBackfillMessage(ctx, params.Portal, &result.Messages[i]); bm != nil {
+			m := &result.Messages[i]
+			if alreadyBridged(m.ID, newestBridged) {
+				reachedBridged = true
+				continue
+			}
+			if bm := t.wrapBackfillMessage(ctx, params.Portal, m); bm != nil {
 				newestFirst = append(newestFirst, bm)
 			}
 		}
-		hasMore = result.HasMore
+		hasMore = result.HasMore && !reachedBridged
 		if !hasMore {
 			break
 		}
@@ -90,6 +98,21 @@ func (t *TeamsClient) FetchMessages(ctx context.Context, params bridgev2.FetchMe
 		// carries compose time, so the timestamp cutoff alone can re-bridge them.
 		AggressiveDeduplication: params.Forward,
 	}, nil
+}
+
+// Teams message ids are arrival times in milliseconds, so they order history.
+func newestBridgedSeq(params bridgev2.FetchMessagesParams) int64 {
+	if !params.Forward || params.AnchorMessage == nil {
+		return 0
+	}
+	_, id, _ := teamsid.ParseMessageID(params.AnchorMessage.ID)
+	seq, _ := strconv.ParseInt(id, 10, 64)
+	return seq
+}
+
+func alreadyBridged(messageID string, newestBridged int64) bool {
+	seq, err := strconv.ParseInt(messageID, 10, 64)
+	return err == nil && seq <= newestBridged
 }
 
 func (t *TeamsClient) wrapBackfillMessage(ctx context.Context, portal *bridgev2.Portal, m *msteams.Message) *bridgev2.BackfillMessage {
