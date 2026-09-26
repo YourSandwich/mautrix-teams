@@ -6,6 +6,15 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped mautrix-go from `v0.28.1` to `v0.31.0` and refreshed dependencies
+  (`go.mau.fi/util` `v0.10.1`, `golang.org/x/net` `v0.59.0`,
+  `mattn/go-sqlite3` `v1.14.52`, the `golang.org/x/*` line). No bridge code
+  changes were needed for the bump itself; new bridgev2 options (login
+  connect wait, transient-disconnect debounce) arrive through the regular
+  config upgrade.
+
 ## [28.1] - 2026-06-17
 
 Tracks mautrix-go `v0.28.1`.
