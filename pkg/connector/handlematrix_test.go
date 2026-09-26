@@ -16,10 +16,21 @@
 package connector
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+
+	"go.mau.fi/mautrix-teams/pkg/msteams"
 )
 
 func TestCaptionToTeams(t *testing.T) {
@@ -44,6 +55,52 @@ func TestCaptionToTeams(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHandleMatrixMembership(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	client, err := msteams.NewClient(msteams.ClientConfig{
+		UserMRI:    "8:orgid:me",
+		SkypeToken: "skype",
+		Endpoints:  msteams.Endpoints{ChatSvcBase: srv.URL},
+		Logger:     zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	tc := &TeamsClient{Client: client, UserMRI: "8:orgid:me"}
+
+	change := func(thread string, target bridgev2.GhostOrUserLogin, typ bridgev2.MembershipChangeType) *bridgev2.MatrixMembershipChange {
+		msg := &bridgev2.MatrixMembershipChange{Target: target, Type: typ}
+		msg.Portal = &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: networkid.PortalID(thread)}}}
+		return msg
+	}
+	ghost := &bridgev2.Ghost{Ghost: &database.Ghost{ID: "00000000-0000-0000-0000-00000000000a"}}
+	ctx := context.Background()
+
+	for _, typ := range []bridgev2.MembershipChangeType{bridgev2.Invite, bridgev2.Kick} {
+		if _, err := tc.HandleMatrixMembership(ctx, change("19:g@thread.v2", ghost, typ)); err != nil {
+			t.Errorf("%+v: %v", typ, err)
+		}
+	}
+	if _, err := tc.HandleMatrixMembership(ctx, change("19:g@thread.v2", &bridgev2.UserLogin{}, bridgev2.Leave)); err != nil {
+		t.Errorf("self leave: %v", err)
+	}
+	if _, err := tc.HandleMatrixMembership(ctx, change("19:a_b@unq.gbl.spaces", ghost, bridgev2.Invite)); !errors.Is(err, bridgev2.ErrMembershipNotSupported) {
+		t.Errorf("DM invite: got %v", err)
+	}
+	want := []string{
+		"PUT /v1/threads/19:g@thread.v2/members/8:orgid:00000000-0000-0000-0000-00000000000a",
+		"DELETE /v1/threads/19:g@thread.v2/members/8:orgid:00000000-0000-0000-0000-00000000000a",
+	}
+	if !slices.Equal(requests, want) {
+		t.Errorf("requests = %v, want %v", requests, want)
 	}
 }
 

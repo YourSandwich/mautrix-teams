@@ -158,4 +158,12 @@ type Event struct {
 	Message    *Message
 	TypingFrom string
 	TypingStop bool
+	ChatUpdate *ChatUpdate
+}
+
+type ChatUpdate struct {
+	Initiator string
+	Joined    []string
+	Left      []string
+	Topic     *string
 }
