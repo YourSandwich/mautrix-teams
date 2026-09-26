@@ -60,6 +60,8 @@ const (
 
 	ic3OAuthScope = "https://ic3.teams.office.com/.default offline_access"
 
+	presenceOAuthScope = "https://presence.teams.microsoft.com/.default offline_access"
+
 	workAuthzURL     = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 	personalAuthzURL = "https://teams.live.com/api/auth/v1.0/authz/consumer"
 
@@ -267,6 +269,18 @@ func (c *Client) RefreshIC3Token(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) RefreshPresenceToken(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, presenceOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.presenceAuth, out)
+	return nil
+}
+
 func (c *Client) RefreshGraphToken(ctx context.Context) error {
 	if IsConsumerTenant(c.cfg.TenantID) {
 		return ErrNotImplemented
@@ -407,6 +421,7 @@ func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 	// Loki/Delve people-card service is hosted in three GEO partitions
 	// (nam/eur/apc); pick the right prefix from the user's data residency.
 	c.delveBase = "https://" + lokiPrefixFor(resp) + ".loki.delve.office.com"
+	c.presenceBase = resp.RegionGtms["unifiedPresence"]
 	c.calling = callingEndpoints{
 		conversationURL: resp.RegionGtms["calling_conversationServiceUrl"],
 		region:          resp.Region,

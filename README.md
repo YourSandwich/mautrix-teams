@@ -47,7 +47,7 @@ below).
 | Read receipts                                 | yes             | -               |
 | Backfill (history on join)                    | -               | yes             |
 | Backfill attachments + reactions + replies    | -               | yes             |
-| Presence                                      | -               | -               |
+| Presence (direct-chat partners, opt-in)       | -               | yes             |
 | Send invites / kick / power level             | -               | -               |
 | User profile sync (name, avatar, contact)     | -               | yes             |
 | Directory metadata (job title, dept, phones)  | -               | yes             |
@@ -169,9 +169,10 @@ knobs:
   OAuth token). The reverse direction (uploading a Matrix file into the Teams
   chat's SharePoint folder) is not implemented; files sent from Matrix go
   through the AMS pipeline, which Teams renders as a plain attachment.
-- **Presence and Teams-side read receipts**: not bridged to Matrix. The bridge
-  sends your Matrix read receipts and typing to Teams, but the reverse
-  (Teams presence / read state) is not forwarded.
+- **Presence and Teams-side read receipts**: Teams availability of your
+  direct-chat partners can be mirrored as Matrix presence
+  (`presence.sync_teams_presence`, off by default). Group members' presence,
+  your own Matrix presence and Teams read state are not bridged.
 - **Cross-tenant federation**: starting a chat works only for users your
   Teams tenant can already address (own tenant + accepted federation
   partners). Teams's directory rejects unknown MRIs server-side.

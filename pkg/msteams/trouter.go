@@ -329,6 +329,8 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 		if err := c.trouterRegisterTransports(ctx, info.SURL, endpoint); err != nil {
 			c.log.Warn().Err(err).Msg("Trouter transport registration failed")
 		}
+		// Presence subscriptions name the socket address, which changes here.
+		go c.renewPresence(ctx)
 	case '2':
 		_ = conn.Write(ctx, websocket.MessageText, []byte("2::"))
 	case '3':
@@ -470,6 +472,8 @@ func (c *Client) dispatchTrouterRequest(reqURL string, body []byte) {
 			return
 		}
 		c.handleEventMessage(env.ResourceType, env.Resource)
+	case strings.HasSuffix(reqURL, "/TeamsUnifiedPresenceService"), strings.HasSuffix(reqURL, "/unifiedPresenceService"):
+		c.handlePresencePush(body)
 	case strings.Contains(reqURL, "/NGCallManagerWin"),
 		strings.Contains(reqURL, "/SkypeSpacesWeb"):
 		c.handleRingFrame(body)

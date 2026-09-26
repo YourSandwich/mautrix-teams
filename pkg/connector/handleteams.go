@@ -66,7 +66,11 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 		t.queueMessageEvent(ctx, ev, false)
 	case msteams.EventTypeChatUpdate:
 		t.queueChatUpdate(ev)
-	case msteams.EventTypeReadReceipt, msteams.EventTypePresence:
+	case msteams.EventTypePresence:
+		if ev.Presence != nil {
+			t.setGhostPresence(ctx, ev.Presence)
+		}
+	case msteams.EventTypeReadReceipt:
 		log.Trace().Msg("Event not yet implemented")
 	default:
 		log.Debug().Msg("Ignoring unknown event type")

@@ -6,6 +6,9 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Opt-in `presence.sync_teams_presence`: direct-chat partners' Teams
+  availability (available, busy, in a call, away, out of office, personal
+  note) shows as Matrix presence on their ghosts.
 ### Changed
 
 - Bumped mautrix-go from `v0.28.1` to `v0.31.0` and refreshed dependencies
