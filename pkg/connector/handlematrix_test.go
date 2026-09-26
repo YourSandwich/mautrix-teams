@@ -18,7 +18,34 @@ package connector
 import (
 	"testing"
 	"time"
+
+	"maunium.net/go/mautrix/event"
 )
+
+func TestCaptionToTeams(t *testing.T) {
+	tc := &TeamsClient{}
+	tests := []struct {
+		name    string
+		content event.MessageEventContent
+		want    string
+	}{
+		{"no filename: body is the filename", event.MessageEventContent{MsgType: event.MsgFile, Body: "report.zip"}, ""},
+		{"filename equals body", event.MessageEventContent{MsgType: event.MsgFile, Body: "a.png", FileName: "a.png"}, ""},
+		{"plain caption", event.MessageEventContent{MsgType: event.MsgImage, Body: "look <here>", FileName: "photo.jpg"}, "<p>look &lt;here&gt;</p>"},
+		{"html caption", event.MessageEventContent{
+			MsgType: event.MsgImage, Body: "look here", FileName: "photo.jpg",
+			Format: event.FormatHTML, FormattedBody: "<p>look <b>here</b></p>",
+		}, "look <b>here</b>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := tc.captionToTeams(&tt.content)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestTeamsArrivalTime(t *testing.T) {
 	if got := teamsArrivalTime("1790340165616"); !got.Equal(time.UnixMilli(1790340165616)) {

@@ -89,6 +89,7 @@ type Client struct {
 	csaBase              string
 	amsBase              string
 	delveBase            string
+	mySiteURL            string
 
 	tokenLock      sync.RWMutex
 	skype          *Token

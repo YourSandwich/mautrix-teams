@@ -37,6 +37,7 @@ type SendOptions struct {
 	Attachments     []Attachment
 	ClientMessageID string
 	DisplayName     string
+	Files           []ChatFile
 }
 
 // sendMessageRequest mirrors the Teams web client's POST body. Any field not
@@ -101,22 +102,32 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 	return opts.ClientMessageID, nil
 }
 
-// buildProperties emits the mentions payload Teams expects: a JSON-encoded
-// string inside the outer JSON (doubly serialised - matches the web client).
-// The itemid indexes into the inline <span itemtype=".../Mention"> tags in
-// the content body.
+// buildProperties emits mentions and files as JSON strings inside the outer
+// JSON, as the web client does. A mention's itemid indexes into the inline
+// <span itemtype=".../Mention"> tags in the content body.
 func buildProperties(opts SendOptions) any {
-	if len(opts.Mentions) == 0 {
+	props := map[string]any{}
+	if mentions := mentionsJSON(opts.Mentions); mentions != "" {
+		props["mentions"] = mentions
+	}
+	if len(opts.Files) > 0 {
+		props["files"] = fileCardsJSON(opts.Files)
+	}
+	if len(props) == 0 {
 		return nil
 	}
+	return props
+}
+
+func mentionsJSON(mentions []Mention) string {
 	type mentionEntry struct {
 		Type        string `json:"@type"`
 		ItemID      int    `json:"itemid"`
 		MRI         string `json:"mri"`
 		MentionType string `json:"mentionType"`
 	}
-	entries := make([]mentionEntry, 0, len(opts.Mentions))
-	for i, m := range opts.Mentions {
+	entries := make([]mentionEntry, 0, len(mentions))
+	for i, m := range mentions {
 		if m.UserID == "" {
 			continue
 		}
@@ -128,13 +139,13 @@ func buildProperties(opts SendOptions) any {
 		})
 	}
 	if len(entries) == 0 {
-		return nil
+		return ""
 	}
 	serialised, err := json.Marshal(entries)
 	if err != nil {
-		return nil
+		return ""
 	}
-	return map[string]any{"mentions": string(serialised)}
+	return string(serialised)
 }
 
 func (c *Client) EditMessage(ctx context.Context, threadID, messageID, newContent string, opts SendOptions) error {
@@ -448,7 +459,7 @@ func (c *Client) withSkypeRetry(ctx context.Context, do func(skype string) error
 // UploadAttachment runs the three-step AMS flow: register object, PUT bytes,
 // return the viewer URL. AMS uses "Authorization: skype_token <token>" - note
 // the distinct header vs. chat-service's "Authentication: skypetoken=".
-func (c *Client) UploadAttachment(ctx context.Context, name, contentType string, data []byte) (*Attachment, error) {
+func (c *Client) UploadAttachment(ctx context.Context, threadID, name, contentType string, data []byte) (*Attachment, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty attachment")
 	}
@@ -458,13 +469,13 @@ func (c *Client) UploadAttachment(ctx context.Context, name, contentType string,
 	var att *Attachment
 	err := c.withSkypeRetry(ctx, func(skype string) error {
 		var err error
-		att, err = c.uploadAMS(ctx, name, contentType, data, skype)
+		att, err = c.uploadAMS(ctx, threadID, name, contentType, data, skype)
 		return err
 	})
 	return att, err
 }
 
-func (c *Client) uploadAMS(ctx context.Context, name, contentType string, data []byte, skype string) (*Attachment, error) {
+func (c *Client) uploadAMS(ctx context.Context, threadID, name, contentType string, data []byte, skype string) (*Attachment, error) {
 	if skype == "" {
 		return nil, ErrUnauthorized
 	}
@@ -494,8 +505,11 @@ func (c *Client) uploadAMS(ctx context.Context, name, contentType string, data [
 		"type":     objType,
 		"filename": name,
 		"permissions": map[string][]string{
-			c.cfg.UserMRI: {"read"},
+			threadID: {"read"},
 		},
+	}
+	if isImage {
+		meta["sharingMode"] = "Inline"
 	}
 	metaBuf, _ := json.Marshal(meta)
 

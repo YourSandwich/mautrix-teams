@@ -374,6 +374,7 @@ func TestFetchAttachmentRetriesOnceAfter401(t *testing.T) {
 
 func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
 	var registers int
+	var meta map[string]any
 	ams := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "skype_token skype-fresh" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -382,6 +383,7 @@ func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/v1/objects":
 			registers++
+			_ = json.NewDecoder(r.Body).Decode(&meta)
 			_, _ = w.Write([]byte(`{"id":"0-obj"}`))
 		case r.Method == "PUT" && r.URL.Path == "/v1/objects/0-obj/content/original":
 			w.WriteHeader(http.StatusCreated)
@@ -394,12 +396,19 @@ func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
 
 	c := newAMSClient(t, ams.URL)
 	c.skype = &Token{Value: "skype-revoked", ExpiresAt: time.Now().Add(time.Hour)}
-	att, err := c.UploadAttachment(context.Background(), "report.zip", "application/zip", []byte("zip"))
+	att, err := c.UploadAttachment(context.Background(), "19:g@thread.v2", "report.zip", "application/zip", []byte("zip"))
 	if err != nil {
 		t.Fatalf("UploadAttachment: %v", err)
 	}
 	if registers != 1 || att.URL != ams.URL+"/v1/objects/0-obj/views/original" {
 		t.Errorf("registers=%d url=%q", registers, att.URL)
+	}
+	perms, _ := meta["permissions"].(map[string]any)
+	if len(perms) != 1 || perms["19:g@thread.v2"] == nil {
+		t.Errorf("object must be readable by the thread, permissions = %v", meta["permissions"])
+	}
+	if _, inline := meta["sharingMode"]; inline {
+		t.Error("sharingMode is only for images")
 	}
 }
 
@@ -435,6 +444,21 @@ func TestTrouterEndpointIDPersists(t *testing.T) {
 	fresh := newClientAt(t, "http://unused")
 	if a, b := fresh.TrouterEndpointID(), fresh.TrouterEndpointID(); a == "" || a != b {
 		t.Errorf("generated id must be stable within a client: %q vs %q", a, b)
+	}
+}
+
+func TestMessageTypeFor(t *testing.T) {
+	tests := []struct {
+		opts SendOptions
+		want string
+	}{
+		{SendOptions{}, "Text"},
+		{SendOptions{ContentType: "html"}, "RichText/Html"},
+	}
+	for _, tt := range tests {
+		if got := messageTypeFor(tt.opts); got != tt.want {
+			t.Errorf("messageTypeFor(%+v) = %q, want %q", tt.opts, got, tt.want)
+		}
 	}
 }
 

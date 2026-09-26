@@ -84,12 +84,15 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 	content := ""
 	switch msg.Content.MsgType {
 	case event.MsgImage, event.MsgFile, event.MsgVideo, event.MsgAudio:
-		html, err := t.matrixMediaToTeamsHTML(ctx, msg)
+		media, files, err := t.matrixMediaToTeams(ctx, msg)
 		if err != nil {
 			return nil, err
 		}
-		content = html
+		caption, mentions := t.captionToTeams(msg.Content)
+		content = media + caption
 		opts.ContentType = "html"
+		opts.Mentions = mentions
+		opts.Files = files
 	default:
 		body, ct, mentions := t.matrixContentToTeams(msg.Content)
 		content = body
@@ -125,25 +128,42 @@ func teamsArrivalTime(messageID string) time.Time {
 	return time.Now()
 }
 
-func (t *TeamsClient) matrixMediaToTeamsHTML(ctx context.Context, msg *bridgev2.MatrixMessage) (string, error) {
+var errChannelFiles = bridgev2.WrapErrorInStatus(errors.New("sending files to Teams channels isn't supported yet")).
+	WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
+
+// matrixMediaToTeams uploads images, video and audio to AMS for inline HTML,
+// and other files to OneDrive as file cards.
+func (t *TeamsClient) matrixMediaToTeams(ctx context.Context, msg *bridgev2.MatrixMessage) (string, []msteams.ChatFile, error) {
 	mxc := msg.Content.URL
 	if msg.Content.File != nil {
 		mxc = msg.Content.File.URL
 	}
 	if mxc == "" {
-		return "", errors.New("media event has no url")
-	}
-	data, err := t.Main.br.Bot.DownloadMedia(ctx, mxc, msg.Content.File)
-	if err != nil {
-		return "", fmt.Errorf("download matrix media: %w", err)
+		return "", nil, errors.New("media event has no url")
 	}
 	contentType := "application/octet-stream"
 	if msg.Content.Info != nil && msg.Content.Info.MimeType != "" {
 		contentType = msg.Content.Info.MimeType
 	}
-	name := msg.Content.Body
+	name := msg.Content.GetFileName()
 	if name == "" {
 		name = "file"
+	}
+	threadID := teamsid.ParsePortalID(msg.Portal.ID)
+	inline := strings.HasPrefix(contentType, "image/") || strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/")
+	if !inline && isTeamsChannelThread(threadID) {
+		return "", nil, errChannelFiles
+	}
+	data, err := t.Main.br.Bot.DownloadMedia(ctx, mxc, msg.Content.File)
+	if err != nil {
+		return "", nil, fmt.Errorf("download matrix media: %w", err)
+	}
+	if !inline {
+		file, err := t.Client.UploadChatFile(ctx, threadID, name, data)
+		if err != nil {
+			return "", nil, fmt.Errorf("upload to onedrive: %w", err)
+		}
+		return "", []msteams.ChatFile{*file}, nil
 	}
 	// Teams recognises voice messages by the AMS object filename literally
 	// being "Voice message"; without that the web client renders it as a
@@ -152,25 +172,20 @@ func (t *TeamsClient) matrixMediaToTeamsHTML(ctx context.Context, msg *bridgev2.
 	if strings.HasPrefix(contentType, "audio/") {
 		uploadName = "Voice message"
 	}
-	att, err := t.Client.UploadAttachment(ctx, uploadName, contentType, data)
+	att, err := t.Client.UploadAttachment(ctx, threadID, uploadName, contentType, data)
 	if err != nil {
-		return "", fmt.Errorf("upload to ams: %w", err)
+		return "", nil, fmt.Errorf("upload to ams: %w", err)
 	}
 	switch {
 	case strings.HasPrefix(contentType, "image/"):
 		return fmt.Sprintf(
 			`<p><img itemscope="image" style="vertical-align:bottom" src="%s" alt="%s" itemtype="http://schema.skype.com/AMSImage" id="%s" itemid="%s" href="%s" target-src="%s"></p>`,
 			att.URL, html.EscapeString(name), att.ID, att.ID, att.URL, att.URL,
-		), nil
+		), nil, nil
 	case strings.HasPrefix(contentType, "video/"):
-		return videoTagHTML(att.URL, name, msg.Content.Info), nil
-	case strings.HasPrefix(contentType, "audio/"):
-		return fmt.Sprintf(`<a href="%s">Voice message</a>`, att.URL), nil
+		return videoTagHTML(att.URL, name, msg.Content.Info), nil, nil
 	}
-	return fmt.Sprintf(
-		`<URIObject type="File.1" url_thumbnail="" uri="%s" url="%s"><a href="%s">%s</a><OriginalName v="%s"/><FileSize v="%d"/></URIObject>`,
-		att.URL, att.URL, att.URL, html.EscapeString(name), html.EscapeString(name), att.Size,
-	), nil
+	return fmt.Sprintf(`<a href="%s">Voice message</a>`, att.URL), nil, nil
 }
 
 // videoTagHTML emits the <video itemtype=".../AMSVideo"> element that Teams
@@ -298,6 +313,17 @@ func (t *TeamsClient) matrixContentToTeams(content *event.MessageEventContent) (
 		}
 	}
 	return content.Body, "text", mentions
+}
+
+func (t *TeamsClient) captionToTeams(content *event.MessageEventContent) (string, []msteams.Mention) {
+	if content.GetCaption() == "" {
+		return "", nil
+	}
+	body, contentType, mentions := t.matrixContentToTeams(content)
+	if contentType == "text" {
+		body = "<p>" + html.EscapeString(body) + "</p>"
+	}
+	return body, mentions
 }
 
 func (t *TeamsClient) matrixHTMLToTeams(in string) (string, []msteams.Mention) {
