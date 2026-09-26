@@ -2,6 +2,7 @@
 !example-config.yaml
 !.pre-commit-config.yaml
 !compose.yaml
+!docs/openapi/*.yaml
 !mautrix-teams.sysusers
 !mautrix-teams.tmpfiles
 
