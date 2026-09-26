@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -398,5 +399,32 @@ func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
 	}
 	if registers != 1 || att.URL != ams.URL+"/v1/objects/0-obj/views/original" {
 		t.Errorf("registers=%d url=%q", registers, att.URL)
+	}
+}
+
+func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
+	giphy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("third-party host received %q", auth)
+		}
+		_, _ = w.Write([]byte("gif"))
+	}))
+	t.Cleanup(giphy.Close)
+	c := newAMSClient(t, "https://at-prod.asyncgw.teams.microsoft.com")
+	if data, _, err := c.FetchAttachment(context.Background(), giphy.URL+"/media/x.gif"); err != nil || string(data) != "gif" {
+		t.Fatalf("got %q, %v", data, err)
+	}
+	for raw, want := range map[string]bool{
+		"https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/0-x/views/imgo": true,
+		"https://api.asm.skype.com/v1/objects/0-x":                              true,
+		"https://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-x":            true,
+		"https://media.giphy.com/media/x/giphy.gif":                             false,
+		"https://evil.example/asyncgw.teams.microsoft.com/x":                    false,
+		"http://eu-prod.asyncgw.teams.microsoft.com/v1/objects/0-x":             false,
+	} {
+		u, _ := url.Parse(raw)
+		if got := c.isAMSHost(u); got != want {
+			t.Errorf("isAMSHost(%s) = %v, want %v", raw, got, want)
+		}
 	}
 }

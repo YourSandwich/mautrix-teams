@@ -575,6 +575,26 @@ func (c *Client) FetchAttachment(ctx context.Context, attachmentURL string) ([]b
 	return data, ctype, err
 }
 
+// Sticker and Giphy images can point at any host; only Teams' media hosts may
+// see the skype token.
+var amsHostSuffixes = []string{".asyncgw.teams.microsoft.com", ".asm.skype.com", ".asyncgw.teams.live.com"}
+
+func (c *Client) isAMSHost(u *url.URL) bool {
+	host := u.Hostname()
+	if base, err := url.Parse(firstNonEmpty(c.amsBaseURL(), c.cfg.Endpoints.AMSBase, DefaultAMSBase)); err == nil && host == base.Hostname() {
+		return true
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	for _, suffix := range amsHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]byte, string, error) {
 	if skype == "" {
 		return nil, "", ErrUnauthorized
@@ -583,14 +603,17 @@ func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]b
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("Authorization", "skype_token "+skype)
+	authed := c.isAMSHost(req.URL)
+	if authed {
+		req.Header.Set("Authorization", "skype_token "+skype)
+	}
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
+	if resp.StatusCode == http.StatusUnauthorized && authed {
 		return nil, "", fmt.Errorf("ams fetch %s: %w", attachmentURL, ErrTokenExpired)
 	}
 	if resp.StatusCode == http.StatusNotFound {
