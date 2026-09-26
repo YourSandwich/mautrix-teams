@@ -18,6 +18,7 @@ package msteams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -305,5 +306,97 @@ func TestTeamsReactionKeyEncoding(t *testing.T) {
 	}
 	if got := DecodeReactionKey(TeamsReactionKey("👍")); got != "👍" {
 		t.Errorf("glyph did not survive key round-trip: got %q", got)
+	}
+}
+
+func newAMSClient(t *testing.T, amsBase string) *Client {
+	t.Helper()
+	authz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tokens":{"skypeToken":"skype-fresh","expiresIn":3600}}`))
+	}))
+	t.Cleanup(authz.Close)
+	c, err := NewClient(ClientConfig{
+		UserMRI:   "8:orgid:me",
+		AuthToken: "aad-access",
+		Endpoints: Endpoints{AMSBase: amsBase},
+		Logger:    zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.authzURLForTest = authz.URL
+	c.skype = &Token{Value: "skype-stale", ExpiresAt: time.Now().Add(-time.Hour)}
+	return c
+}
+
+func TestFetchAttachmentRefreshesExpiredToken(t *testing.T) {
+	ams := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "skype_token skype-fresh" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	t.Cleanup(ams.Close)
+
+	c := newAMSClient(t, ams.URL)
+	data, ctype, err := c.FetchAttachment(context.Background(), ams.URL+"/v1/objects/0-x/views/imgo")
+	if err != nil {
+		t.Fatalf("FetchAttachment: %v", err)
+	}
+	if string(data) != "png-bytes" || ctype != "image/png" {
+		t.Errorf("got %q %q", data, ctype)
+	}
+}
+
+func TestFetchAttachmentRetriesOnceAfter401(t *testing.T) {
+	calls := 0
+	ams := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(ams.Close)
+
+	c := newAMSClient(t, ams.URL)
+	c.skype = &Token{Value: "skype-revoked", ExpiresAt: time.Now().Add(time.Hour)}
+	_, _, err := c.FetchAttachment(context.Background(), ams.URL+"/v1/objects/0-x/views/imgo")
+	if !errors.Is(err, ErrTokenExpired) {
+		t.Errorf("want ErrTokenExpired, got %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("want 2 AMS calls (original + one retry), got %d", calls)
+	}
+}
+
+func TestUploadAttachmentRetriesRegisterAfter401(t *testing.T) {
+	var registers int
+	ams := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "skype_token skype-fresh" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/objects":
+			registers++
+			_, _ = w.Write([]byte(`{"id":"0-obj"}`))
+		case r.Method == "PUT" && r.URL.Path == "/v1/objects/0-obj/content/original":
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(ams.Close)
+
+	c := newAMSClient(t, ams.URL)
+	c.skype = &Token{Value: "skype-revoked", ExpiresAt: time.Now().Add(time.Hour)}
+	att, err := c.UploadAttachment(context.Background(), "report.zip", "application/zip", []byte("zip"))
+	if err != nil {
+		t.Fatalf("UploadAttachment: %v", err)
+	}
+	if registers != 1 || att.URL != ams.URL+"/v1/objects/0-obj/views/original" {
+		t.Errorf("registers=%d url=%q", registers, att.URL)
 	}
 }
