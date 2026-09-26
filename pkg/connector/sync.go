@@ -107,6 +107,37 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 		Msg("Synced chats from Teams")
 }
 
+// bridgev2 forward-backfills only the portals whose last bridged message is
+// older than the chat's last activity.
+func (t *TeamsClient) resyncChats(ctx context.Context) {
+	log := zerolog.Ctx(ctx)
+	chats, err := t.Client.ListChats(ctx)
+	if err != nil {
+		log.Err(err).Msg("Failed to list chats for resync after message loss")
+		return
+	}
+	queued := 0
+	for _, chat := range chats {
+		if chat.LastUpdated.IsZero() {
+			continue
+		}
+		portalKey := teamsid.MakePortalKey(chat.ID, t.UserLogin.ID, t.splitPortals())
+		portal, err := t.Main.br.GetExistingPortalByKey(ctx, portalKey)
+		if err != nil || portal == nil || portal.MXID == "" {
+			continue
+		}
+		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+			},
+			LatestMessageTS: chat.LastUpdated,
+		})
+		queued++
+	}
+	log.Info().Int("queued", queued).Int("chats", len(chats)).Msg("Queued chat resync after Trouter message loss")
+}
+
 func (t *TeamsClient) fetchTeams(ctx context.Context) []msteams.Team {
 	teams, err := t.Client.ListTeams(ctx)
 	if err != nil {

@@ -407,7 +407,11 @@ func (c *Client) handleTrouterEvent(payload []byte) {
 		return
 	}
 	if ev.Name == "trouter.message_loss" {
-		c.log.Warn().Msg("Trouter signalled message_loss; clients should re-sync chat history")
+		c.log.Warn().Msg("Trouter signalled message_loss; requesting chat resync")
+		select {
+		case c.resyncNeeded <- struct{}{}:
+		default:
+		}
 	}
 }
 

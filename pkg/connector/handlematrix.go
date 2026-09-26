@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"html"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,9 +112,17 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 		DB: &database.Message{
 			ID:        teamsid.MakeMessageID(threadID, id),
 			SenderID:  teamsid.MakeUserID(t.UserMRI),
-			Timestamp: time.Now(),
+			Timestamp: teamsArrivalTime(id),
 		},
 	}, nil
+}
+
+// Teams message ids are the server's arrival time in milliseconds.
+func teamsArrivalTime(messageID string) time.Time {
+	if ms, err := strconv.ParseInt(messageID, 10, 64); err == nil {
+		return time.UnixMilli(ms)
+	}
+	return time.Now()
 }
 
 func (t *TeamsClient) matrixMediaToTeamsHTML(ctx context.Context, msg *bridgev2.MatrixMessage) (string, error) {
