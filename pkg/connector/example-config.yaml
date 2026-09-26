@@ -47,3 +47,9 @@ endpoints:
     mt: ""
     trouter: ""
     ams: ""
+
+# Teams calls. Only the call-test command places calls so far.
+calls:
+    # STUN server (host:port) the bridge uses to learn its public address for
+    # call media. Leave empty to offer only the host's own addresses.
+    stun_server: stun.l.google.com:19302

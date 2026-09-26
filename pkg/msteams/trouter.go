@@ -397,8 +397,8 @@ func (c *Client) handleTrouterRequest(ctx context.Context, conn *websocket.Conn,
 		c.log.Debug().Err(err).Msg("Trouter: bad request JSON")
 		return
 	}
-	ack, _ := json.Marshal(map[string]any{"id": req.ID, "status": 200, "body": ""})
-	_ = conn.Write(ctx, websocket.MessageText, append([]byte("3:::"), ack...))
+	reply, _ := json.Marshal(c.trouterReply(&req))
+	_ = conn.Write(ctx, websocket.MessageText, append([]byte("3:::"), reply...))
 
 	body := []byte(req.Body)
 	if strings.EqualFold(req.Headers["X-Microsoft-Skype-Content-Encoding"], "gzip") {
@@ -409,6 +409,14 @@ func (c *Client) handleTrouterRequest(ctx context.Context, conn *websocket.Conn,
 		}
 	}
 	c.dispatchTrouterRequest(req.URL, body)
+}
+
+func (c *Client) trouterReply(req *trouterRequest) map[string]any {
+	reply := map[string]any{"id": req.ID, "status": 200, "body": ""}
+	if call := c.callForCallback(req.URL); call != nil && strings.HasSuffix(req.URL, "/call/acceptance/") {
+		reply["headers"], reply["body"] = call.acceptanceReply(req.Headers)
+	}
+	return reply
 }
 
 func gunzipBase64(s string) ([]byte, error) {
@@ -466,6 +474,10 @@ func (c *Client) dispatchTrouterRequest(reqURL string, body []byte) {
 		strings.Contains(reqURL, "/SkypeSpacesWeb"):
 		c.handleRingFrame(body)
 	case strings.Contains(reqURL, "/callAgent"):
+		if call := c.callForCallback(reqURL); call != nil {
+			call.handleCallback(reqURL, body)
+			return
+		}
 		c.handleCallAgentFrame(reqURL, body)
 	default:
 		c.log.Debug().Str("url", reqURL).Int("len", len(body)).Msg("Trouter: unhandled endpoint")

@@ -60,6 +60,8 @@ type Config struct {
 
 	Endpoints EndpointConfig `yaml:"endpoints"`
 
+	Calls CallsConfig `yaml:"calls"`
+
 	displaynameTemplate *template.Template `yaml:"-"`
 	chatNameTemplate    *template.Template `yaml:"-"`
 }
@@ -101,6 +103,10 @@ func (p PresenceConfig) SendReadReceipts() bool {
 		return true
 	}
 	return *p.SendMatrixReadReceipts
+}
+
+type CallsConfig struct {
+	STUNServer string `yaml:"stun_server"`
 }
 
 // EndpointConfig lets the operator override Teams API hosts. Empty fields fall
@@ -191,4 +197,5 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Str, "endpoints", "mt")
 	helper.Copy(up.Str, "endpoints", "trouter")
 	helper.Copy(up.Str, "endpoints", "ams")
+	helper.Copy(up.Str, "calls", "stun_server")
 }

@@ -50,6 +50,7 @@ func (tc *TeamsConnector) Init(bridge *bridgev2.Bridge) {
 	tc.br = bridge
 	proc := bridge.Commands.(*commands.Processor)
 	proc.AddHandler(CommandSearch)
+	proc.AddHandler(CommandCallTest)
 	// Hide commands that don't apply to a personal puppeting bridge: relay
 	// mode, raw appservice debug pokes, and reset-network (Disconnect/Connect
 	// is automatic on token refresh anyway).

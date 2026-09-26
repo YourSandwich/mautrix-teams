@@ -89,6 +89,7 @@ type Client struct {
 	csaBase              string
 	amsBase              string
 	delveBase            string
+	calling              callingEndpoints
 	mySiteURL            string
 
 	tokenLock      sync.RWMutex
@@ -98,6 +99,7 @@ type Client struct {
 	searchAuth     *Token
 	delveAuth      *Token
 	graphAuth      *Token
+	ic3Auth        *Token
 	sharePointAuth map[string]*Token
 	refresh        string
 
@@ -136,6 +138,8 @@ type Client struct {
 	// NGC and SkypeSpacesWeb both fire per incoming call (NGC twice).
 	recentRingMu sync.Mutex
 	recentRing   map[string]time.Time
+
+	callsByEndpoint sync.Map
 }
 
 // sentMessageTTL only needs to outlast the Trouter echo round-trip (seconds,
