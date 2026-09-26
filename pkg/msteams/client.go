@@ -83,6 +83,7 @@ type Client struct {
 
 	authzURLForTest      string
 	tokenEndpointForTest string
+	graphURLForTest      string
 	chatSvcBase          string
 	mtBase               string
 	csaBase              string
@@ -95,6 +96,7 @@ type Client struct {
 	csaAuth        *Token
 	searchAuth     *Token
 	delveAuth      *Token
+	graphAuth      *Token
 	sharePointAuth map[string]*Token
 	refresh        string
 

@@ -18,6 +18,7 @@ package msteams
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -631,6 +632,44 @@ func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]b
 }
 
 func (c *Client) FetchSharedFile(ctx context.Context, f SharedFile) ([]byte, string, error) {
+	data, ctype, err := c.fetchSharePointFile(ctx, f)
+	if err == nil || ctx.Err() != nil {
+		return data, ctype, err
+	}
+	data, ctype, gerr := c.fetchSharedFileViaGraph(ctx, f)
+	if gerr != nil {
+		return nil, "", fmt.Errorf("%w; graph fallback: %w", err, gerr)
+	}
+	return data, ctype, nil
+}
+
+func (c *Client) fetchSharedFileViaGraph(ctx context.Context, f SharedFile) ([]byte, string, error) {
+	link := firstNonEmpty(f.ShareURL, f.FileURL)
+	if link == "" {
+		return nil, "", fmt.Errorf("no sharing url")
+	}
+	token, err := c.scopedToken(ctx, &c.graphAuth, c.RefreshGraphToken)
+	if err != nil {
+		return nil, "", fmt.Errorf("graph token: %w", err)
+	}
+	shareID := "u!" + base64.RawURLEncoding.EncodeToString([]byte(link))
+	req, err := http.NewRequestWithContext(ctx, "GET", firstNonEmpty(c.graphURLForTest, graphBaseURL)+"/shares/"+shareID+"/driveItem/content", nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Prefer", "redeemSharingLinkIfNecessary")
+	// Graph redirects to a pre-authenticated SharePoint URL, and the client
+	// must drop Authorization on that cross-host hop, which net/http does.
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	return readDownload(resp, "graph shares")
+}
+
+func (c *Client) fetchSharePointFile(ctx context.Context, f SharedFile) ([]byte, string, error) {
 	endpoint, host, err := sharedFileDownloadEndpoint(f)
 	if err != nil {
 		return nil, "", err
@@ -654,15 +693,18 @@ func (c *Client) FetchSharedFile(ctx context.Context, f SharedFile) ([]byte, str
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, "", ErrTokenExpired
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, "", ErrNotFound
-	}
-	if resp.StatusCode >= 400 {
+	return readDownload(resp, "sharepoint fetch "+endpoint)
+}
+
+func readDownload(resp *http.Response, what string) ([]byte, string, error) {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, "", fmt.Errorf("%s: %w", what, ErrTokenExpired)
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, "", fmt.Errorf("%s: %w", what, ErrNotFound)
+	case resp.StatusCode >= 400:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("sharepoint fetch %s: %d %s", endpoint, resp.StatusCode, string(body))
+		return nil, "", fmt.Errorf("%s: %d %s", what, resp.StatusCode, string(body))
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024*1024))
 	if err != nil {
