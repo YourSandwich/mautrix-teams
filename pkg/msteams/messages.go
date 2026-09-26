@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -429,6 +430,20 @@ func isChatMessage(messageType string) bool {
 	return false
 }
 
+func (c *Client) withSkypeRetry(ctx context.Context, do func(skype string) error) error {
+	if err := c.ensureFreshTokens(ctx, false, true); err != nil {
+		return err
+	}
+	err := do(c.skypeTokenValue())
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := c.RefreshSkypeToken(ctx); rerr != nil {
+			return fmt.Errorf("reauth after ams 401: %w", rerr)
+		}
+		err = do(c.skypeTokenValue())
+	}
+	return err
+}
+
 // UploadAttachment runs the three-step AMS flow: register object, PUT bytes,
 // return the viewer URL. AMS uses "Authorization: skype_token <token>" - note
 // the distinct header vs. chat-service's "Authentication: skypetoken=".
@@ -439,7 +454,16 @@ func (c *Client) UploadAttachment(ctx context.Context, name, contentType string,
 	if name == "" {
 		name = "file"
 	}
-	skype := c.skypeTokenValue()
+	var att *Attachment
+	err := c.withSkypeRetry(ctx, func(skype string) error {
+		var err error
+		att, err = c.uploadAMS(ctx, name, contentType, data, skype)
+		return err
+	})
+	return att, err
+}
+
+func (c *Client) uploadAMS(ctx context.Context, name, contentType string, data []byte, skype string) (*Attachment, error) {
 	if skype == "" {
 		return nil, ErrUnauthorized
 	}
@@ -486,6 +510,9 @@ func (c *Client) UploadAttachment(ctx context.Context, name, contentType string,
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("ams register: %w", ErrTokenExpired)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("ams register: %d %s", resp.StatusCode, string(body))
 	}
@@ -507,6 +534,9 @@ func (c *Client) UploadAttachment(ctx context.Context, name, contentType string,
 		return nil, err
 	}
 	uresp.Body.Close()
+	if uresp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("ams upload: %w", ErrTokenExpired)
+	}
 	if uresp.StatusCode >= 400 {
 		return nil, fmt.Errorf("ams upload: %d", uresp.StatusCode)
 	}
@@ -535,7 +565,17 @@ func (c *Client) FetchAttachment(ctx context.Context, attachmentURL string) ([]b
 	if attachmentURL == "" {
 		return nil, "", fmt.Errorf("empty url")
 	}
-	skype := c.skypeTokenValue()
+	var data []byte
+	var ctype string
+	err := c.withSkypeRetry(ctx, func(skype string) error {
+		var err error
+		data, ctype, err = c.fetchAMS(ctx, attachmentURL, skype)
+		return err
+	})
+	return data, ctype, err
+}
+
+func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]byte, string, error) {
 	if skype == "" {
 		return nil, "", ErrUnauthorized
 	}
@@ -550,6 +590,9 @@ func (c *Client) FetchAttachment(ctx context.Context, attachmentURL string) ([]b
 		return nil, "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, "", fmt.Errorf("ams fetch %s: %w", attachmentURL, ErrTokenExpired)
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, "", ErrNotFound
 	}
