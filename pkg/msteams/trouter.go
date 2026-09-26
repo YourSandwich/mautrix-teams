@@ -719,6 +719,7 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 	case "Text", "RichText", "RichText/Html", "RichText/Media_GenericFile",
 		"RichText/Media_Card", "RichText/Media_FlikMsg":
 	default:
+		c.log.Debug().Str("message_type", r.MessageType).Str("thread", threadID).Msg("Trouter: ignoring unsupported message type")
 		return
 	}
 	// A content edit is marked by properties.edittime (skypeeditedid is unset on
