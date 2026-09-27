@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -50,6 +51,7 @@ type rawThreadProps struct {
 	Meeting            string `json:"meeting"`
 	UniqueRosterThread string `json:"uniquerosterthread"`
 	Picture            string `json:"picture"`
+	PinnedItems        string `json:"pinnedItems"`
 	ProductThreadType  string `json:"productThreadType"`
 	LiveState          string `json:"awareness_conversationLiveState:0"`
 }
@@ -850,8 +852,37 @@ func threadIDFromLocation(location string) string {
 }
 
 func (c *Client) SetTopic(ctx context.Context, threadID, topic string) error {
-	endpoint := c.chatSvcBaseURL() + "/v1/threads/" + url.PathEscape(threadID) + "/properties?name=topic"
-	return c.doJSON(ctx, "PUT", endpoint, AuthSkype, map[string]string{"topic": topic}, nil)
+	return c.setThreadProperty(ctx, threadID, "topic", topic)
+}
+
+// pinnedItem is an entry of a thread's pinnedItems property, a JSON array
+// that lists the newest pin first.
+type pinnedItem struct {
+	ItemID   string `json:"itemId"`
+	ItemType string `json:"itemType"`
+}
+
+// UpdatePinned pins and unpins messages the way the web client does: new pins
+// go first, and the other pins stay as they are.
+func (c *Client) UpdatePinned(ctx context.Context, threadID string, pin, unpin []string) error {
+	chat, err := c.GetChat(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	ids := slices.Concat(pin, chat.Pinned)
+	items := make([]pinnedItem, 0, len(ids))
+	for i, id := range ids {
+		if slices.Index(ids, id) == i && !slices.Contains(unpin, id) {
+			items = append(items, pinnedItem{ItemID: id, ItemType: "Message"})
+		}
+	}
+	value, _ := json.Marshal(items)
+	return c.setThreadProperty(ctx, threadID, "pinnedItems", string(value))
+}
+
+func (c *Client) setThreadProperty(ctx context.Context, threadID, name, value string) error {
+	endpoint := c.chatSvcBaseURL() + "/v1/threads/" + url.PathEscape(threadID) + "/properties?name=" + name
+	return c.doJSON(ctx, "PUT", endpoint, AuthSkype, map[string]string{name: value}, nil)
 }
 
 func (c *Client) AddMember(ctx context.Context, threadID, mri string) error {
@@ -875,6 +906,11 @@ func convertRawConversation(r *rawConversation) Chat {
 		ID:      r.ID,
 		Topic:   firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meeting.Subject),
 		Picture: firstNonEmpty(r.ThreadProperties.Picture, r.Properties.Picture),
+	}
+	var pins []pinnedItem
+	_ = json.Unmarshal([]byte(firstNonEmpty(r.ThreadProperties.PinnedItems, r.Properties.PinnedItems)), &pins)
+	for _, pin := range pins {
+		c.Pinned = append(c.Pinned, pin.ItemID)
 	}
 	if meeting.OrganizerID != "" && meeting.TenantID != "" {
 		c.Meeting = &MeetingRef{TenantID: meeting.TenantID, OrganizerID: meeting.OrganizerID}

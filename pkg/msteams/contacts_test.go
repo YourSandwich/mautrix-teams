@@ -274,6 +274,31 @@ func TestStartOneOnOne(t *testing.T) {
 	}
 }
 
+// Pins read from the thread and written back with the new pin first, as the
+// web client does.
+func TestUpdatePinned(t *testing.T) {
+	const threadID = "19:x@thread.v2"
+	var written map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/threads/"+threadID:
+			_, _ = w.Write([]byte(`{"id":"19:x@thread.v2","properties":{"pinnedItems":"[{\"itemId\":\"old\",\"itemType\":\"Message\"},{\"itemId\":\"gone\",\"itemType\":\"Message\"}]"}}`))
+		case r.Method == "PUT" && r.URL.Path == "/v1/threads/"+threadID+"/properties" && r.URL.Query().Get("name") == "pinnedItems":
+			_ = json.NewDecoder(r.Body).Decode(&written)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	if err := c.UpdatePinned(context.Background(), threadID, []string{"new", "old"}, []string{"gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"itemId":"new","itemType":"Message"},{"itemId":"old","itemType":"Message"}]`; written["pinnedItems"] != want {
+		t.Errorf("pinnedItems = %s", written["pinnedItems"])
+	}
+}
+
 func TestThreadMemberOps(t *testing.T) {
 	var got []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

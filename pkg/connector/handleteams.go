@@ -136,6 +136,23 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 				return info, err
 			},
 		})
+	case upd.Pins:
+		// Queued behind the chat's earlier events, so a message pinned right
+		// after it was sent is bridged by then.
+		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+				PostHandleFunc: func(ctx context.Context, portal *bridgev2.Portal) {
+					chat, err := t.Client.GetChat(ctx, ev.ThreadID)
+					if err != nil {
+						zerolog.Ctx(ctx).Err(err).Msg("Failed to read the chat's pins")
+						return
+					}
+					t.syncPins(ctx, portal, chat.Pinned)
+				},
+			},
+		})
 	case upd.Topic == nil:
 	case *upd.Topic == "":
 		// A cleared topic falls back to a name built from the roster, which

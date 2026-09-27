@@ -168,8 +168,9 @@ func (tc *TeamsConnector) Start(ctx context.Context) error {
 	// Synchronous so GetName() has the icon before the first login triggers
 	// personal-space / management-room creation.
 	tc.uploadNetworkIcon(ctx)
-	if tc.Config.Calls.ElementCall {
-		if mc, ok := tc.br.Matrix.(*matrix.Connector); ok {
+	if mc, ok := tc.br.Matrix.(*matrix.Connector); ok {
+		mc.EventProcessor.On(event.StatePinnedEvents, tc.handleMatrixPins)
+		if tc.Config.Calls.ElementCall {
 			mc.EventProcessor.On(matrixrtc.MemberEvent, tc.handleCallMember)
 			mc.EventProcessor.On(event.EventReaction, tc.handleCallReaction)
 			mc.EventProcessor.On(event.EventRedaction, tc.handleCallRedaction)
