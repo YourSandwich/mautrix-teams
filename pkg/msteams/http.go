@@ -146,6 +146,12 @@ func (c *Client) attachAuth(req *http.Request, kind AuthKind) error {
 			return ErrUnauthorized
 		}
 		req.Header.Set("Authentication", "skypetoken="+c.skype.Value)
+		if c.cfg.Personal {
+			// The consumer chat service is shared with Skype; the web client
+			// names the Teams product on every request.
+			req.Header.Set("ms-ic3-product", "tfl")
+			req.Header.Set("ms-ic3-additional-product", "Sfl")
+		}
 	case AuthRegistration:
 		if c.skype == nil || c.skype.Value == "" {
 			return ErrUnauthorized

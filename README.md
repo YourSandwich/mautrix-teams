@@ -3,10 +3,11 @@
 A Matrix-Microsoft Teams puppeting bridge built on the
 [mautrix-go](https://github.com/mautrix/go) `bridgev2` framework.
 
-The bridge logs into `teams.microsoft.com` using the same web-client tokens
-the Teams web app receives, so it works with a normal personal, work, or
-school account and does **not** require an Azure app registration, tenant
-admin consent, or a paid Microsoft Communication Services SDK.
+The bridge logs into Teams using the same tokens the Teams clients receive,
+so it works with a normal work or school account, and does **not** require an
+Azure app registration, tenant admin consent, or a paid Microsoft
+Communication Services SDK. Personal Microsoft accounts (Teams free) have
+their own login flow, which is new and not yet verified end to end.
 
 ## Maintenance
 
@@ -104,9 +105,24 @@ Arch users can build the AUR-style PKGBUILD under `packaging/arch/`.
    ./mautrix-teams
    ```
 5. In Matrix, start a chat with the bridge bot (`@msteamsbot:<your-server>`)
-   and run `login`. Pick the device-code flow and visit the Microsoft login
-   URL the bot prints. After consent, all your DMs, groups, channels and team
-   spaces appear in your Matrix account.
+   and run `login`. Pick **Work or school account** or **Personal Microsoft
+   account** and visit the Microsoft login URL the bot prints. After consent,
+   all your DMs, groups, channels and team spaces appear in your Matrix
+   account.
+
+### Several accounts
+
+One Matrix user can log in more than once, for example with a work and a
+personal account: run `login` again and pick the other flow. Microsoft signs
+the two kinds of account in through different apps, which is why the flow has
+to be picked rather than detected. `list-logins` shows the logins.
+
+Commands act on the login of the room they are sent in. In the management
+room they act on the work login (or the only login), unless the command
+starts with `work`, `personal` or a login ID from `list-logins`, e.g.
+`status personal away`. A chat
+that includes two of your own accounts is one shared room unless the bridge
+runs with `split_portals`.
 
 ### Double puppeting
 

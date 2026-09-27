@@ -175,3 +175,43 @@ func TestDoJSONRetryAfter401(t *testing.T) {
 		t.Errorf("authz called %d times, want 1", callsAuthz)
 	}
 }
+
+// Shaped like the consumer authz response of the personal account capture.
+const consumerAuthzResponse = `{"skypeToken":{"skypetoken":"skype-consumer","expiresIn":28799,"skypeid":"live:.cid.0123456789abcdef","isBusinessTenant":false},
+	"regionGtms":{"chatService":"https://msgapi.teams.live.com","chatServiceAfd":"https://teams.live.com/api/chatsvc/consumer",
+	"middleTier":"https://teams.live.com/api/mt","authSvcEndpointMetadata":{"endpointUrl":"https://teams.live.com/api/auth","tokenScopes":["x"]}},
+	"regionSettings":{"isFederationEnabled":true}}`
+
+func TestPersonalSkypeToken(t *testing.T) {
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("client_id") != PersonalOAuthClientID || r.Form.Get("scope") != personalSkypeTokenScope {
+			t.Errorf("refresh form: %v", r.Form)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mbi-access", "expires_in": 3600})
+	}))
+	t.Cleanup(tokens.Close)
+	authz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer mbi-access" {
+			t.Errorf("authz bearer: %q", got)
+		}
+		_, _ = w.Write([]byte(consumerAuthzResponse))
+	}))
+	t.Cleanup(authz.Close)
+	c, err := NewClient(ClientConfig{Personal: true, RefreshToken: "refresh", Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.tokenEndpointForTest, c.authzURLForTest = tokens.URL, authz.URL
+
+	if err := c.RefreshSkypeToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, skype := c.SnapshotTokens(); skype == nil || skype.Value != "skype-consumer" {
+		t.Errorf("skype token = %+v", skype)
+	}
+	if c.SkypeID() != "live:.cid.0123456789abcdef" || c.ChatSvcBase() != "https://teams.live.com/api/chatsvc/consumer" || c.mtBaseURL() != "https://teams.live.com/api/mt" {
+		t.Errorf("skype id %q, chat %q, mt %q", c.SkypeID(), c.ChatSvcBase(), c.mtBaseURL())
+	}
+}

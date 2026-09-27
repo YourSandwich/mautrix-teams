@@ -47,6 +47,12 @@ const (
 	trouterTCCV            = "2024.23.01.2"
 )
 
+// Personal accounts get chat events through the Skype Trouter and registrar.
+const (
+	consumerTrouterHost  = "https://go.trouter.skype.com/"
+	consumerRegistrarURL = "https://edge.skype.com/registrar/prod/v2/registrations"
+)
+
 type trouterInfo struct {
 	SocketIO      string            `json:"socketio"`
 	SURL          string            `json:"surl"`
@@ -110,7 +116,7 @@ func (c *Client) trouterRegisterOnce(ctx context.Context, endpoint string) (*tro
 		return nil, ErrUnauthorized
 	}
 
-	u := "https://go.trouter.teams.microsoft.com/v4/a?epid=" + url.QueryEscape(endpoint)
+	u := c.trouterHost() + "v4/a?epid=" + url.QueryEscape(endpoint)
 	req, err := http.NewRequestWithContext(ctx, "POST", u, nil)
 	if err != nil {
 		return nil, err
@@ -136,12 +142,19 @@ func (c *Client) trouterRegisterOnce(ctx context.Context, endpoint string) (*tro
 		return nil, fmt.Errorf("decode trouter info: %w", err)
 	}
 	if info.SocketIO == "" {
-		info.SocketIO = "https://go.trouter.teams.microsoft.com/"
+		info.SocketIO = c.trouterHost()
 	}
 	if info.SURL == "" {
 		return nil, fmt.Errorf("trouter info missing surl")
 	}
 	return &info, nil
+}
+
+func (c *Client) trouterHost() string {
+	if c.cfg.Personal {
+		return consumerTrouterHost
+	}
+	return "https://go.trouter.teams.microsoft.com/"
 }
 
 func (c *Client) trouterSession(ctx context.Context, info *trouterInfo, endpoint string) (string, error) {
@@ -1093,11 +1106,14 @@ func (c *Client) trouterSendEphemeral(ctx context.Context, conn *websocket.Conn,
 }
 
 func (c *Client) trouterSendAuth(ctx context.Context, conn *websocket.Conn, info *trouterInfo) error {
-	auth := c.authTokenValue()
+	credential := fmt.Sprintf(`"Authorization":"Bearer %s"`, c.authTokenValue())
+	if c.cfg.Personal {
+		credential = fmt.Sprintf(`"X-Skypetoken":"%s"`, c.skypeTokenValue())
+	}
 	cp, _ := json.Marshal(info.ConnectParams)
 	payload := fmt.Sprintf(
-		`{"name":"user.authenticate","args":[{"headers":{"X-Ms-Test-User":"False","Authorization":"Bearer %s","X-MS-Migration":"True"},"connectparams":%s}]}`,
-		auth, string(cp),
+		`{"name":"user.authenticate","args":[{"headers":{"X-Ms-Test-User":"False",%s,"X-MS-Migration":"True"},"connectparams":%s}]}`,
+		credential, string(cp),
 	)
 	return c.trouterSendEphemeral(ctx, conn, payload)
 }
@@ -1120,33 +1136,43 @@ func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint s
 	if err := c.ensureFreshTokens(ctx, true, true); err != nil {
 		return fmt.Errorf("refresh tokens for registrar: %w", err)
 	}
-	apps := []struct {
-		appID, templateKey, path string
-	}{
-		{"NextGenCalling", "DesktopNgc_2.3:SkypeNgc", surl + "NGCallManagerWin"},
-		{"SkypeSpacesWeb", "SkypeSpacesWeb_2.3", surl + "SkypeSpacesWeb"},
+	type registration struct {
+		appID, templateKey, path, regID, productContext string
+	}
+	apps := []registration{
+		{"NextGenCalling", "DesktopNgc_2.3:SkypeNgc", surl + "NGCallManagerWin", newUUIDv4(), ""},
+		{"SkypeSpacesWeb", "SkypeSpacesWeb_2.3", surl + "SkypeSpacesWeb", newUUIDv4(), ""},
 		// SkypeSpacesCallAgent surfaces incoming-call notifications via Trouter
 		// for ad-hoc DM/group calls that never post into the chat-service.
-		{"SkypeSpacesCallAgent", "SkypeSpacesCallAgent_2.3", surl + "callAgent"},
-		{"TeamsCDLWebWorker", "TeamsCDLWebWorker_2.1", surl},
+		{"SkypeSpacesCallAgent", "SkypeSpacesCallAgent_2.3", surl + "callAgent", newUUIDv4(), ""},
+		{"TeamsCDLWebWorker", "TeamsCDLWebWorker_2.1", surl, endpoint, ""},
+	}
+	registrar := trouterRegistrarURL
+	if c.cfg.Personal {
+		// As the teams.live.com web client registers for chat events.
+		registrar = consumerRegistrarURL
+		apps = []registration{
+			{"TeamsCDLWebWorker", "TeamsCDLWebWorker_2.6", surl, endpoint, "TFL"},
+			{"TeamsCDLWebWorker", "TeamsCDLWebWorker_2.3", surl, endpoint + "_GG", ""},
+		}
 	}
 	var firstErr error
 	for _, app := range apps {
-		regID := newUUIDv4()
-		if app.appID == "TeamsCDLWebWorker" {
-			regID = endpoint
+		description := map[string]any{
+			"appId":             app.appID,
+			"aesKey":            "",
+			"languageId":        "en-US",
+			"platform":          "edge",
+			"templateKey":       app.templateKey,
+			"platformUIVersion": trouterClientVersion,
+		}
+		if c.cfg.Personal {
+			description["productContext"] = app.productContext
 		}
 		body := map[string]any{
-			"clientDescription": map[string]any{
-				"appId":             app.appID,
-				"aesKey":            "",
-				"languageId":        "en-US",
-				"platform":          "edge",
-				"templateKey":       app.templateKey,
-				"platformUIVersion": trouterClientVersion,
-			},
-			"registrationId": regID,
-			"nodeId":         "",
+			"clientDescription": description,
+			"registrationId":    app.regID,
+			"nodeId":            "",
 			"transports": map[string]any{
 				"TROUTER": []any{map[string]any{
 					"context": "",
@@ -1156,7 +1182,7 @@ func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint s
 			},
 		}
 		raw, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(ctx, "POST", trouterRegistrarURL, bytes.NewReader(raw))
+		req, err := http.NewRequestWithContext(ctx, "POST", registrar, bytes.NewReader(raw))
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -1165,7 +1191,11 @@ func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint s
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Skypetoken", c.skypeTokenValue())
-		req.Header.Set("Authorization", "Bearer "+c.authTokenValue())
+		if c.cfg.Personal {
+			req.Header.Set("X-MS-Migration", "True")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+c.authTokenValue())
+		}
 		req.Header.Set("User-Agent", c.cfg.UserAgent)
 		resp, err := c.http.Do(req)
 		if err != nil {

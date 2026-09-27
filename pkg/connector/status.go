@@ -87,7 +87,7 @@ func cmdStatus(ce *commands.Event) {
 		ce.Reply("Teams sets your status from your activity again.")
 	case known:
 		if err := t.Client.SetAvailability(ce.Ctx, availability); err != nil {
-			ce.Reply("Couldn't set your Teams status: %v", err)
+			ce.Reply("Couldn't set your Teams status: %v", describeStatusError(err, ""))
 			return
 		}
 		ce.Reply("Your Teams status is %s until you change it or run `$cmdprefix status auto`.", word)
@@ -103,7 +103,7 @@ func cmdStatusMessage(ce *commands.Event) {
 	}
 	message := strings.TrimSpace(ce.RawArgs)
 	if err := t.Client.SetStatusNote(ce.Ctx, message); err != nil {
-		ce.Reply("Couldn't change your Teams status message: %v", err)
+		ce.Reply("Couldn't change your Teams status message: %v", describeStatusError(err, ""))
 		return
 	}
 	if message == "" {
@@ -195,7 +195,10 @@ func describeAutoReplies(r *msteams.AutoReplies) string {
 }
 
 func describeStatusError(err error, permission string) error {
-	if errors.Is(err, msteams.ErrForbidden) {
+	if errors.Is(err, msteams.ErrNotImplemented) {
+		return errors.New("the bridge can't do this for personal accounts yet")
+	}
+	if permission != "" && errors.Is(err, msteams.ErrForbidden) {
 		return fmt.Errorf("Microsoft doesn't give the Teams sign-in the %s permission this needs", permission)
 	}
 	return err
