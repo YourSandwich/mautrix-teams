@@ -18,6 +18,7 @@ package connector
 
 import (
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/id"
 )
 
 type UserLoginMetadata struct {
@@ -40,9 +41,11 @@ type UserLoginMetadata struct {
 }
 
 type PortalMetadata struct {
-	ChatType string `json:"chat_type,omitempty"`
-	TeamID   string `json:"team_id,omitempty"`
-	IsMuted  bool   `json:"is_muted,omitempty"`
+	ChatType       string     `json:"chat_type,omitempty"`
+	TeamID         string     `json:"team_id,omitempty"`
+	IsMuted        bool       `json:"is_muted,omitempty"`
+	UpcomingNotice id.EventID `json:"upcoming_notice,omitempty"`
+	UpcomingText   string     `json:"upcoming_text,omitempty"`
 }
 
 func (tc *TeamsConnector) GetDBMetaTypes() database.MetaTypes {
