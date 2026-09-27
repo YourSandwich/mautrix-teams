@@ -64,6 +64,7 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 			return
 		}
 		t.queueMessageEvent(ctx, ev, false)
+		go t.refreshLiveMeeting(ctx, ev.Message.ThreadID)
 	case msteams.EventTypeChatUpdate:
 		t.queueChatUpdate(ev)
 	case msteams.EventTypePresence:

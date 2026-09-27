@@ -86,18 +86,7 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 			parent := teamsid.MeetingsPortalID
 			info.ParentID = &parent
 		}
-		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
-			EventMeta: simplevent.EventMeta{
-				Type:         bridgev2.RemoteEventChatResync,
-				PortalKey:    portalKey,
-				CreatePortal: true,
-				LogContext: func(c zerolog.Context) zerolog.Context {
-					return c.Str("teams_thread", chat.ID).Str("chat_type", string(chat.Type))
-				},
-			},
-			ChatInfo:        info,
-			LatestMessageTS: chat.LastUpdated, // non-zero unblocks the framework's backfill gate
-		})
+		t.queueChatResync(&chat, info)
 		queued++
 	}
 	log.Info().
@@ -108,6 +97,22 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 	if cfg.Presence.SyncTeamsPresence {
 		t.subscribePresence(ctx, chats)
 	}
+	t.syncLiveMeetings(ctx, chats)
+}
+
+func (t *TeamsClient) queueChatResync(chat *msteams.Chat, info *bridgev2.ChatInfo) {
+	t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:         bridgev2.RemoteEventChatResync,
+			PortalKey:    teamsid.MakePortalKey(chat.ID, t.UserLogin.ID, t.splitPortals()),
+			CreatePortal: true,
+			LogContext: func(c zerolog.Context) zerolog.Context {
+				return c.Str("teams_thread", chat.ID).Str("chat_type", string(chat.Type))
+			},
+		},
+		ChatInfo:        info,
+		LatestMessageTS: chat.LastUpdated, // non-zero unblocks the framework's backfill gate
+	})
 }
 
 // bridgev2 forward-backfills only the portals whose last bridged message is
@@ -139,6 +144,7 @@ func (t *TeamsClient) resyncChats(ctx context.Context) {
 		queued++
 	}
 	log.Info().Int("queued", queued).Int("chats", len(chats)).Msg("Queued chat resync after Trouter message loss")
+	t.syncLiveMeetings(ctx, chats)
 }
 
 func (t *TeamsClient) fetchTeams(ctx context.Context) []msteams.Team {

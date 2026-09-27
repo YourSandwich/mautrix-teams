@@ -31,6 +31,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-teams/pkg/matrixrtc"
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
 )
@@ -187,6 +188,12 @@ func (t *TeamsClient) wrapChatInfo(ctx context.Context, chat *msteams.Chat) *bri
 			Membership:  event.MembershipJoin,
 		}
 	}
+	for _, mri := range t.callParticipants(chat.ID) {
+		uid := teamsid.MakeUserID(mri)
+		if _, ok := memberMap[uid]; !ok {
+			memberMap[uid] = bridgev2.ChatMember{EventSender: bridgev2.EventSender{Sender: uid}, Membership: event.MembershipJoin}
+		}
+	}
 	selfID := teamsid.MakeUserID(t.UserMRI)
 	if _, ok := memberMap[selfID]; !ok {
 		memberMap[selfID] = bridgev2.ChatMember{
@@ -202,6 +209,9 @@ func (t *TeamsClient) wrapChatInfo(ctx context.Context, chat *msteams.Chat) *bri
 	info.Members = &bridgev2.ChatMemberList{
 		IsFull:    len(chat.Members) > 0,
 		MemberMap: memberMap,
+	}
+	if t.Main.Config.Calls.ElementCall {
+		info.Members.PowerLevels = &bridgev2.PowerLevelOverrides{Events: map[event.Type]int{matrixrtc.MemberEvent: 0}}
 	}
 	return info
 }
