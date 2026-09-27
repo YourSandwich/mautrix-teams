@@ -21,7 +21,7 @@ func TestStripMRIPrefix(t *testing.T) {
 	for in, want := range map[string]string{
 		"8:orgid:00000000-0000-0000-0000-00000000000a": "00000000-0000-0000-0000-00000000000a",
 		"8:live:.cid.0123456789abcdef":                 "live:.cid.0123456789abcdef",
-		"8:jane.doe":                             "jane.doe",
+		"8:jane.doe":                                   "jane.doe",
 		"4:+4312345":                                   "+4312345",
 		"plain":                                        "plain",
 	} {
