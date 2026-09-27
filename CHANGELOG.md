@@ -6,6 +6,12 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Ghosts of users outside the tenant directory (personal Microsoft accounts,
+  Skype, phone numbers) that were created before their name was known kept
+  their id as display name. The next message they send now renames them.
+
 ## [31.0] - 2026-09-26
 
 Tracks mautrix-go `v0.31.0`.
