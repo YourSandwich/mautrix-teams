@@ -74,46 +74,56 @@ func (c *Client) postPresenceSubscriptions(ctx context.Context, mris []string) e
 	if surl == nil || *surl == "" {
 		return errors.New("trouter is not connected")
 	}
-	token, err := c.scopedToken(ctx, &c.presenceAuth, c.RefreshPresenceToken)
-	if err != nil {
-		return fmt.Errorf("presence token: %w", err)
-	}
-	c.tokenLock.RLock()
-	base := firstNonEmpty(c.presenceBase, defaultPresenceBase)
-	c.tokenLock.RUnlock()
-	epid := c.trouterEndpointID()
-	endpoint := base + "/v1/pubsub/subscriptions/" + url.PathEscape(epid)
+	path := "/v1/pubsub/subscriptions/" + url.PathEscape(c.trouterEndpointID())
 	for batch := range slices.Chunk(mris, presenceBatchSize) {
 		add := make([]map[string]string, len(batch))
 		for i, mri := range batch {
 			add[i] = map[string]string{"mri": mri}
 		}
-		body, _ := json.Marshal(map[string]any{
+		err := c.presenceRequest(ctx, http.MethodPost, path, map[string]any{
 			"trouterUri":                       *surl + "TeamsUnifiedPresenceService",
 			"subscriptionsToAdd":               add,
 			"subscriptionsToRemove":            []any{},
 			"shouldPurgePreviousSubscriptions": false,
 		})
-		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return fmt.Errorf("presence subscribe: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("x-ms-client-user-agent", "Teams-V2-Desktop")
-		req.Header.Set("x-ms-correlation-id", "1")
-		req.Header.Set("x-ms-client-version", presenceClientVersion)
-		req.Header.Set("x-ms-endpoint-id", epid)
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return err
-		}
+	}
+	return nil
+}
+
+func (c *Client) presenceRequest(ctx context.Context, method, path string, body any) error {
+	token, err := c.scopedToken(ctx, &c.presenceAuth, c.RefreshPresenceToken)
+	if err != nil {
+		return fmt.Errorf("presence token: %w", err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	c.tokenLock.RLock()
+	base := firstNonEmpty(c.presenceBase, defaultPresenceBase)
+	c.tokenLock.RUnlock()
+	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-ms-client-user-agent", "Teams-V2-Desktop")
+	req.Header.Set("x-ms-correlation-id", "1")
+	req.Header.Set("x-ms-client-version", presenceClientVersion)
+	req.Header.Set("x-ms-endpoint-id", c.trouterEndpointID())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return fmt.Errorf("presence subscribe: %d %s", resp.StatusCode, data)
-		}
+		return fmt.Errorf("%d %s", resp.StatusCode, data)
 	}
 	return nil
 }

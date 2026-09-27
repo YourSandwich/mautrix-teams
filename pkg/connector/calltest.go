@@ -47,14 +47,8 @@ var CommandCallTest = &commands.FullHandler{
 }
 
 func cmdCallTest(ce *commands.Event) {
-	login := ce.User.GetDefaultLogin()
-	if login == nil {
-		ce.Reply("You're not logged in")
-		return
-	}
-	t, ok := login.Client.(*TeamsClient)
-	if !ok || !t.IsLoggedIn() {
-		ce.Reply("Your Teams login isn't connected")
+	t := loggedInClient(ce)
+	if t == nil {
 		return
 	}
 	target, threadID, label := msteams.EchoBotMRI, msteams.EchoThreadID(t.UserMRI), "the Teams Echo bot"

@@ -183,7 +183,13 @@ func (c *Client) bearerJSON(ctx context.Context, method, endpoint, token string,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w: %s %s: %s", ErrForbidden, method, req.URL.Path, data)
+		}
 		return fmt.Errorf("%s %s: %d %s", method, req.URL.Path, resp.StatusCode, data)
+	}
+	if out == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

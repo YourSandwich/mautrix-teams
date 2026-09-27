@@ -51,6 +51,9 @@ func (tc *TeamsConnector) Init(bridge *bridgev2.Bridge) {
 	proc := bridge.Commands.(*commands.Processor)
 	proc.AddHandler(CommandSearch)
 	proc.AddHandler(CommandCallTest)
+	proc.AddHandler(CommandStatus)
+	proc.AddHandler(CommandStatusMessage)
+	proc.AddHandler(CommandOutOfOffice)
 	// Hide commands that don't apply to a personal puppeting bridge: relay
 	// mode, raw appservice debug pokes, and reset-network (Disconnect/Connect
 	// is automatic on token refresh anyway).
@@ -74,6 +77,22 @@ func hiddenCommand(name string) commands.CommandHandler {
 		// which is how we keep the command out of the printed help list.
 		NetworkAPI: func(bridgev2.NetworkAPI) bool { return false },
 	}
+}
+
+// loggedInClient returns the user's connected Teams client, or replies why
+// there is none.
+func loggedInClient(ce *commands.Event) *TeamsClient {
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("You're not logged in")
+		return nil
+	}
+	t, ok := login.Client.(*TeamsClient)
+	if !ok || !t.IsLoggedIn() {
+		ce.Reply("Your Teams login isn't connected")
+		return nil
+	}
+	return t
 }
 
 func (tc *TeamsConnector) Start(ctx context.Context) error {
