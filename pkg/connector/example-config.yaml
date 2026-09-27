@@ -60,3 +60,13 @@ calls:
     # Pin the next occurrence of each meeting from your Teams calendar in its
     # meeting chat's room, and keep it current.
     upcoming_meetings: false
+    # Show Teams meetings that are running as Element Calls in their rooms.
+    # Needs MatrixRTC (a LiveKit focus in the homeserver's .well-known).
+    element_call: false
+    # Also carry camera video and screen sharing between Teams meetings and
+    # Element Call. Video Element Call sends as VP8 or VP9 is re-encoded to
+    # H.264 with ffmpeg (with libx264), which costs CPU per stream.
+    video: false
+    # Send re-encoded Matrix cameras to Teams flipped left to right, the way
+    # Element Call shows your own camera, instead of the way others see it.
+    mirror_camera: false

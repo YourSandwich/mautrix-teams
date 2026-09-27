@@ -91,13 +91,12 @@ func (r callTestResult) String() string {
 
 func (t *TeamsClient) runCallTest(ctx context.Context, target, threadID string) string {
 	start := time.Now()
-	leg, err := teamsmedia.NewAudioLeg(ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer})
+	leg, err := teamsmedia.NewAudioLeg(ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer, Direct: msteams.PeerToPeer(target)})
 	if err != nil {
 		return "Couldn't set up call media: " + err.Error()
 	}
 	defer leg.Close()
-	displayName := t.UserLogin.Metadata.(*UserLoginMetadata).DisplayName
-	call, answer, err := t.Client.PlaceCall(ctx, threadID, target, displayName, leg.SDP())
+	call, answer, err := t.Client.PlaceCall(ctx, threadID, target, t.displayName(), leg.SDP())
 	if err != nil {
 		return "Call failed: " + err.Error()
 	}

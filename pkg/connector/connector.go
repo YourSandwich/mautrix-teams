@@ -25,12 +25,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/mautrix-teams/pkg/matrixrtc"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -45,6 +49,12 @@ type TeamsConnector struct {
 	Config Config
 
 	networkIcon atomic.Pointer[id.ContentURIString]
+
+	rtcTransportLock sync.Mutex
+	transport        matrixrtc.Transport
+	// The latest ring a Matrix user's Element Call sent in each room, for a
+	// one-to-one call's other side to decline: id.RoomID to id.EventID.
+	rings sync.Map
 }
 
 var _ bridgev2.NetworkConnector = (*TeamsConnector)(nil)
@@ -54,6 +64,8 @@ func (tc *TeamsConnector) Init(bridge *bridgev2.Bridge) {
 	proc := bridge.Commands.(*commands.Processor)
 	proc.AddHandler(CommandSearch)
 	proc.AddHandler(CommandCallTest)
+	proc.AddHandler(CommandJoinMeeting)
+	proc.AddHandler(CommandCreateMeeting)
 	proc.AddHandler(CommandStatus)
 	proc.AddHandler(CommandStatusMessage)
 	proc.AddHandler(CommandOutOfOffice)
@@ -156,6 +168,16 @@ func (tc *TeamsConnector) Start(ctx context.Context) error {
 	// Synchronous so GetName() has the icon before the first login triggers
 	// personal-space / management-room creation.
 	tc.uploadNetworkIcon(ctx)
+	if tc.Config.Calls.ElementCall {
+		if mc, ok := tc.br.Matrix.(*matrix.Connector); ok {
+			mc.EventProcessor.On(matrixrtc.MemberEvent, tc.handleCallMember)
+			mc.EventProcessor.On(event.EventReaction, tc.handleCallReaction)
+			mc.EventProcessor.On(event.EventRedaction, tc.handleCallRedaction)
+			mc.EventProcessor.On(event.StateMember, tc.handleCallInvite)
+			mc.EventProcessor.On(matrixrtc.NotificationEvent, tc.handleCallRing)
+			mc.EventProcessor.On(matrixrtc.DeclineEvent, tc.handleCallDecline)
+		}
+	}
 	return nil
 }
 

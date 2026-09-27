@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -27,6 +28,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
@@ -48,6 +50,9 @@ type TeamsClient struct {
 	UserMRI   string
 
 	stopPump context.CancelFunc
+
+	liveCallsLock sync.Mutex
+	liveCalls     map[id.RoomID]*liveCall
 }
 
 var (
@@ -156,6 +161,7 @@ func (t *TeamsClient) persistTokens(ctx context.Context) {
 }
 
 func (t *TeamsClient) Disconnect() {
+	t.leaveLiveCalls(t.UserLogin.Log.WithContext(context.Background()))
 	if t.stopPump != nil {
 		t.stopPump()
 		t.stopPump = nil
@@ -241,8 +247,16 @@ func (t *TeamsClient) eventLoop(ctx context.Context) {
 				return
 			}
 			t.HandleTeamsEvent(ctx, ev)
+		case inc := <-t.Client.IncomingCalls():
+			if t.Main.Config.Calls.ElementCall {
+				go t.ringIncomingCall(ctx, inc)
+			}
 		}
 	}
+}
+
+func (t *TeamsClient) displayName() string {
+	return t.UserLogin.Metadata.(*UserLoginMetadata).DisplayName
 }
 
 func (t *TeamsClient) splitPortals() bool {

@@ -109,6 +109,9 @@ func (p PresenceConfig) SendReadReceipts() bool {
 type CallsConfig struct {
 	STUNServer       string `yaml:"stun_server"`
 	UpcomingMeetings bool   `yaml:"upcoming_meetings"`
+	ElementCall      bool   `yaml:"element_call"`
+	Video            bool   `yaml:"video"`
+	MirrorCamera     bool   `yaml:"mirror_camera"`
 }
 
 // EndpointConfig lets the operator override Teams API hosts. Empty fields fall
@@ -202,4 +205,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Str, "endpoints", "ams")
 	helper.Copy(up.Str, "calls", "stun_server")
 	helper.Copy(up.Bool, "calls", "upcoming_meetings")
+	helper.Copy(up.Bool, "calls", "element_call")
+	helper.Copy(up.Bool, "calls", "video")
+	helper.Copy(up.Bool, "calls", "mirror_camera")
 }
