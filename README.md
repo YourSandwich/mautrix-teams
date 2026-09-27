@@ -29,7 +29,7 @@ features are not bridged yet (see the matrix below).
 | Threads in DM/group (rendered as quoted reply)| yes             | yes             |
 | Edits                                         | yes             | yes             |
 | Deletions (soft + hard, configurable)         | yes             | yes             |
-| Reactions (legacy + full unicode emoji)       | yes             | yes             |
+| Reactions (legacy, unicode, skin tones)       | yes             | yes             |
 | Code blocks with language                     | yes             | yes             |
 | Images                                        | yes             | yes             |
 | Stickers / Giphy                              | -               | yes             |
@@ -46,6 +46,8 @@ features are not bridged yet (see the matrix below).
 | Presence (direct-chat partners, opt-in)       | -               | yes             |
 | Membership changes (add / remove / join)      | yes             | yes             |
 | Chat renames (group and meeting chats)        | yes             | yes             |
+| Group chat pictures                           | -               | yes             |
+| Pinned messages                               | yes             | yes             |
 | Power levels / chat roles                     | -               | -               |
 | User profile sync (name, avatar, contact)     | -               | yes             |
 | Directory metadata (job title, dept, phones)  | -               | yes             |
@@ -282,6 +284,9 @@ Graph v1.0 description, regenerated with
   direct-chat partners can be mirrored as Matrix presence
   (`presence.sync_teams_presence`, off by default). Group members' presence,
   your own Matrix presence and Teams read state are not bridged.
+- **Pinned messages**: only messages the bridge has bridged can show as
+  pinned in Matrix. Unpinning every message of a chat while the bridge is
+  down shows in Matrix after that chat's next pin change.
 - **Power levels**: Teams chat roles (admin/user) are not mapped to Matrix
   power levels in either direction.
 - **Cross-tenant federation**: starting a chat works only for users your
