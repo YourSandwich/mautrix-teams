@@ -751,10 +751,8 @@ func parseSubstrateResponse(data []byte) []User {
 	return users
 }
 
-// StartOneOnOne returns the implicit DM thread between the logged-in user
-// and target. Teams doesn't require an explicit "create" call: the thread id
-// is the two GUIDs sorted lexicographically, and Teams materialises the
-// conversation server-side on the first message we POST into it.
+// StartOneOnOne returns the DM thread between the logged-in user and target,
+// creating it as the web client does when the two have never chatted.
 func (c *Client) StartOneOnOne(ctx context.Context, targetMRI string) (*Chat, error) {
 	if targetMRI == "" {
 		return nil, fmt.Errorf("empty target MRI")
@@ -764,48 +762,35 @@ func (c *Client) StartOneOnOne(ctx context.Context, targetMRI string) (*Chat, er
 	if a > b {
 		a, b = b, a
 	}
-	threadID := fmt.Sprintf("19:%s_%s@unq.gbl.spaces", a, b)
-	return &Chat{
-		ID:   threadID,
-		Type: ChatType1on1,
-		Members: []Member{
-			{MRI: c.cfg.UserMRI},
-			{MRI: targetMRI},
-		},
-	}, nil
+	chat := &Chat{
+		ID:      fmt.Sprintf("19:%s_%s@unq.gbl.spaces", a, b),
+		Type:    ChatType1on1,
+		Members: []Member{{MRI: c.cfg.UserMRI}, {MRI: targetMRI}},
+	}
+	if _, err := c.GetChat(ctx, chat.ID); err == nil {
+		return chat, nil
+	}
+	var err error
+	chat.ID, err = c.createThread(ctx, []threadMember{{c.cfg.UserMRI, "Admin"}, {targetMRI, "Admin"}},
+		map[string]any{"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true})
+	if err != nil {
+		return nil, err
+	}
+	return chat, nil
 }
 
 func (c *Client) CreateGroupChat(ctx context.Context, topic string, members []string) (*Chat, error) {
-	type member struct {
-		ID   string `json:"id"`
-		Role string `json:"role"`
-	}
-	body := struct {
-		Members    []member          `json:"members"`
-		Properties map[string]string `json:"properties"`
-	}{
-		Members:    []member{{ID: c.cfg.UserMRI, Role: "Admin"}},
-		Properties: map[string]string{"threadType": "chat", "chatFilesIndexId": "2"},
-	}
+	roster := []threadMember{{c.cfg.UserMRI, "Admin"}}
 	chat := &Chat{Type: ChatTypeGroup, Members: []Member{{MRI: c.cfg.UserMRI, Role: "Admin"}}}
 	for _, mri := range members {
 		if mri != c.cfg.UserMRI {
-			body.Members = append(body.Members, member{ID: mri, Role: "User"})
+			roster = append(roster, threadMember{mri, "User"})
 			chat.Members = append(chat.Members, Member{MRI: mri})
 		}
 	}
-	// The id comes in Location on a 201, or in the body of the thread a
-	// redirect leads to.
-	var created struct {
-		ID string `json:"id"`
-	}
-	hdr, err := c.doJSONHeaders(ctx, "POST", c.chatSvcBaseURL()+"/v1/threads", AuthSkype, body, &created)
-	if err != nil {
-		return nil, fmt.Errorf("create thread: %w", err)
-	}
-	chat.ID = firstNonEmpty(threadIDFromLocation(hdr.Get("Location")), created.ID)
-	if chat.ID == "" {
-		return nil, fmt.Errorf("create thread: no thread id in response")
+	var err error
+	if chat.ID, err = c.createThread(ctx, roster, map[string]any{"threadType": "chat", "chatFilesIndexId": "2"}); err != nil {
+		return nil, err
 	}
 	if topic != "" {
 		if err := c.SetTopic(ctx, chat.ID, topic); err != nil {
@@ -815,6 +800,28 @@ func (c *Client) CreateGroupChat(ctx context.Context, topic string, members []st
 		}
 	}
 	return chat, nil
+}
+
+type threadMember struct {
+	ID   string `json:"id"`
+	Role string `json:"role"`
+}
+
+func (c *Client) createThread(ctx context.Context, members []threadMember, properties map[string]any) (string, error) {
+	body := map[string]any{"members": members, "properties": properties}
+	// The id comes in Location on a 201, or in the body of the thread a
+	// redirect leads to.
+	var created struct {
+		ID string `json:"id"`
+	}
+	hdr, err := c.doJSONHeaders(ctx, "POST", c.chatSvcBaseURL()+"/v1/threads", AuthSkype, body, &created)
+	if err != nil {
+		return "", fmt.Errorf("create thread: %w", err)
+	}
+	if id := firstNonEmpty(threadIDFromLocation(hdr.Get("Location")), created.ID); id != "" {
+		return id, nil
+	}
+	return "", fmt.Errorf("create thread: no thread id in response")
 }
 
 func threadIDFromLocation(location string) string {
