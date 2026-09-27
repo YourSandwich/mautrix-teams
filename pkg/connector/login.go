@@ -31,24 +31,30 @@ import (
 )
 
 const (
-	LoginFlowIDDeviceCode       = "device_code"
-	LoginFlowIDDeviceCodeTenant = "device_code_tenant"
-	LoginStepIDTenantPrompt     = "fi.mau.teams.login.tenant"
-	LoginStepIDDeviceCodePrompt = "fi.mau.teams.login.device_code"
-	LoginStepIDComplete         = "fi.mau.teams.login.complete"
+	LoginFlowIDDeviceCode         = "device_code"
+	LoginFlowIDDeviceCodeTenant   = "device_code_tenant"
+	LoginFlowIDDeviceCodePersonal = "device_code_personal"
+	LoginStepIDTenantPrompt       = "fi.mau.teams.login.tenant"
+	LoginStepIDDeviceCodePrompt   = "fi.mau.teams.login.device_code"
+	LoginStepIDComplete           = "fi.mau.teams.login.complete"
 )
 
 func (tc *TeamsConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{
 		{
-			Name:        "Teams OAuth device code",
-			Description: "Log in through Microsoft's device-code flow. Uses the 'common' AAD tenant, so both work/school and personal Microsoft accounts work. Picks your default tenant when you have several.",
+			Name:        "Work or school account",
+			Description: "Log in with a work or school Microsoft account through Microsoft's device-code flow. Picks your default organisation when you have several.",
 			ID:          LoginFlowIDDeviceCode,
 		},
 		{
-			Name:        "Teams OAuth device code (specific tenant)",
-			Description: "Like the default flow, but prompts for a tenant GUID (or domain) first. Use this when you have multiple work orgs and want to bridge one that isn't your default.",
+			Name:        "Work or school account (specific organisation)",
+			Description: "Like the work flow, but asks for a tenant GUID (or domain) first. Use this when you belong to several organisations and want to bridge one that isn't your default.",
 			ID:          LoginFlowIDDeviceCodeTenant,
+		},
+		{
+			Name:        "Personal Microsoft account",
+			Description: "Log in with a personal account (Outlook.com, Hotmail, Live) as used by Teams free. Microsoft signs these in through a different app, so pick this flow for them.",
+			ID:          LoginFlowIDDeviceCodePersonal,
 		},
 	}
 }
@@ -59,6 +65,8 @@ func (tc *TeamsConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 		return &TeamsDeviceCodeLogin{connector: tc, User: user, tenant: "common"}, nil
 	case LoginFlowIDDeviceCodeTenant:
 		return &TeamsDeviceCodeLogin{connector: tc, User: user, askForTenant: true}, nil
+	case LoginFlowIDDeviceCodePersonal:
+		return &TeamsDeviceCodeLogin{connector: tc, User: user, personal: true}, nil
 	}
 	return nil, fmt.Errorf("unknown login flow %q", flowID)
 }
@@ -69,6 +77,7 @@ type TeamsDeviceCodeLogin struct {
 
 	tenant       string // resolved tenant alias or GUID used for device-code endpoint
 	askForTenant bool   // true when the flow prompts the user for a tenant first
+	personal     bool
 
 	deviceCode string
 	interval   time.Duration
@@ -117,7 +126,7 @@ func (l *TeamsDeviceCodeLogin) startDeviceCode(ctx context.Context) (*bridgev2.L
 	// "common" accepts both AAD work/school accounts and Microsoft
 	// Accounts (consumer). We route tenant-specific behaviour downstream
 	// based on the id_token's tid claim.
-	resp, err := msteams.StartDeviceCode(ctx, http.DefaultClient, tenant)
+	resp, err := msteams.StartDeviceCode(ctx, http.DefaultClient, tenant, l.personal)
 	if err != nil {
 		return nil, fmt.Errorf("request device code: %w", err)
 	}
@@ -153,7 +162,7 @@ func (l *TeamsDeviceCodeLogin) Wait(ctx context.Context) (*bridgev2.LoginStep, e
 	if pollTenant == "" {
 		pollTenant = "common"
 	}
-	tok, err := msteams.PollDeviceCode(ctx, http.DefaultClient, pollTenant, l.deviceCode, l.interval)
+	tok, err := msteams.PollDeviceCode(ctx, http.DefaultClient, pollTenant, l.personal, l.deviceCode, l.interval)
 	if err != nil {
 		return nil, fmt.Errorf("poll device code: %w", err)
 	}
@@ -165,16 +174,14 @@ func (l *TeamsDeviceCodeLogin) Wait(ctx context.Context) (*bridgev2.LoginStep, e
 	if claims.TenantID == "" || claims.ObjectID == "" {
 		return nil, fmt.Errorf("id_token missing tid/oid claims")
 	}
-	mri := "8:orgid:" + claims.ObjectID
-	remoteName := mri
-	for _, c := range []string{claims.DisplayName, claims.UPN, claims.PreferredUN, claims.Email} {
-		if c != "" {
-			remoteName = c
-			break
-		}
+	// A personal account's MRI comes from the authz response below.
+	mri := ""
+	if !l.personal {
+		mri = "8:orgid:" + claims.ObjectID
 	}
 
 	client, err := msteams.NewClient(msteams.ClientConfig{
+		Personal:     l.personal,
 		TenantID:     claims.TenantID,
 		UserMRI:      mri,
 		AuthToken:    tok.AccessToken,
@@ -190,9 +197,22 @@ func (l *TeamsDeviceCodeLogin) Wait(ctx context.Context) (*bridgev2.LoginStep, e
 	}
 	_, skype := client.SnapshotTokens()
 	chatSvc := client.ChatSvcBase()
+	if l.personal {
+		mri = "8:" + client.SkypeID()
+	}
 	_ = client.Close()
 	if skype == nil || skype.Value == "" {
 		return nil, fmt.Errorf("authz returned no skype token")
+	}
+	if mri == "8:" {
+		return nil, fmt.Errorf("authz named no skype id for the personal account")
+	}
+	remoteName := mri
+	for _, c := range []string{claims.DisplayName, claims.UPN, claims.PreferredUN, claims.Email} {
+		if c != "" {
+			remoteName = c
+			break
+		}
 	}
 
 	ul, err := l.User.NewLogin(ctx, &database.UserLogin{

@@ -40,6 +40,9 @@ const (
 )
 
 type ClientConfig struct {
+	// Personal is set for personal Microsoft accounts, which sign in through
+	// their own OAuth client and use the teams.live.com services.
+	Personal     bool
 	TenantID     string
 	UserMRI      string
 	SkypeToken   string
@@ -93,6 +96,7 @@ type Client struct {
 	calling              callingEndpoints
 	presenceBase         string
 	mySiteURL            string
+	skypeID              string
 
 	tokenLock      sync.RWMutex
 	skype          *Token
@@ -233,7 +237,8 @@ func (c *Client) CachedUserProfile(mri string) *User {
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
-	if cfg.UserMRI == "" {
+	// A personal login learns its MRI only from the authz response.
+	if cfg.UserMRI == "" && !cfg.Personal {
 		return nil, ErrTokenInvalid
 	}
 	if cfg.UserAgent == "" {

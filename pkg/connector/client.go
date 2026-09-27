@@ -59,6 +59,7 @@ var (
 func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	meta := login.Metadata.(*UserLoginMetadata)
 	cfg := msteams.ClientConfig{
+		Personal:          accountKind(login.ID) == "personal",
 		TenantID:          meta.TenantID,
 		UserMRI:           meta.UserMRI,
 		SkypeToken:        meta.SkypeToken,

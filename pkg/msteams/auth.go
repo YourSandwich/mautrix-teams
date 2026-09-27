@@ -37,6 +37,11 @@ const (
 	workOAuthResource = "https://api.spaces.skype.com"
 	workOAuthScope    = workOAuthResource + "/.default openid profile offline_access"
 
+	// Personal accounts, as purple-teams' personal build signs them in: the
+	// middle-tier scope for login, a legacy MSA service scope for authz.
+	personalOAuthScope      = "https://mtsvc.fl.teams.microsoft.com/teams.mt.readwrite openid profile offline_access"
+	personalSkypeTokenScope = "service::api.fl.spaces.skype.com::MBI_SSL openid profile offline_access"
+
 	// csaOAuthScope is the audience the chat-service-aggregator (teams.microsoft.com/api/csa)
 	// demands. The skype-scope bearer works for the chat-service and AMS, but
 	// csa rejects it with "User is not authorized."; a second refresh-token
@@ -101,11 +106,43 @@ type authzResponse struct {
 		ExpiresIn  int    `json:"expiresIn"`
 		TokenType  string `json:"tokenType"`
 	} `json:"tokens"`
-	Region        string            `json:"region"`
-	Partition     string            `json:"partition"`
-	UserRegion    string            `json:"userRegion"`
-	UserPartition string            `json:"userPartition"`
-	RegionGtms    map[string]string `json:"regionGtms"`
+	// The consumer authz returns the token here instead of under tokens.
+	SkypeToken struct {
+		SkypeToken string `json:"skypetoken"`
+		ExpiresIn  int    `json:"expiresIn"`
+		SkypeID    string `json:"skypeid"`
+	} `json:"skypeToken"`
+	Region        string     `json:"region"`
+	Partition     string     `json:"partition"`
+	UserRegion    string     `json:"userRegion"`
+	UserPartition string     `json:"userPartition"`
+	RegionGtms    regionGtms `json:"regionGtms"`
+}
+
+// regionGtms keeps the string values of authz's regionGtms; the consumer
+// response also nests endpoint metadata objects there.
+type regionGtms map[string]string
+
+func (g *regionGtms) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*g = make(regionGtms, len(raw))
+	for k, v := range raw {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			(*g)[k] = s
+		}
+	}
+	return nil
+}
+
+func oauthClientID(personal bool) string {
+	if personal {
+		return PersonalOAuthClientID
+	}
+	return WorkOAuthClientID
 }
 
 func (c *Client) SnapshotRefresh() string {
@@ -139,18 +176,18 @@ func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride st
 		return nil, ErrUnauthorized
 	}
 	tenant := tenantOverride
-	if tenant == "" {
-		tenant = c.cfg.TenantID
-	}
-	if tenant == "" {
-		tenant = "common"
+	switch {
+	case c.cfg.Personal:
+		tenant = "consumers"
+	case tenant == "":
+		tenant = firstNonEmpty(c.cfg.TenantID, "common")
 	}
 	endpoint := c.tokenEndpointForTest
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenant)
 	}
 	form := url.Values{}
-	form.Set("client_id", WorkOAuthClientID)
+	form.Set("client_id", oauthClientID(c.cfg.Personal))
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refresh)
 	form.Set("scope", scope)
@@ -194,7 +231,11 @@ func (c *Client) RefreshAuthToken(ctx context.Context) error {
 	if IsConsumerTenant(c.cfg.TenantID) {
 		tenantOverride = "consumers"
 	}
-	out, err := c.refreshOAuthToken(ctx, workOAuthScope, tenantOverride)
+	scope := workOAuthScope
+	if c.cfg.Personal {
+		scope = personalOAuthScope
+	}
+	out, err := c.refreshOAuthToken(ctx, scope, tenantOverride)
 	if err != nil {
 		return err
 	}
@@ -324,6 +365,13 @@ func (c *Client) RefreshSharePointToken(ctx context.Context, host string) error 
 // Authz needs a live bearer; refresh it proactively when expired and once
 // reactively on 401 (Azure can revoke a bearer before its stored expiry).
 func (c *Client) RefreshSkypeToken(ctx context.Context) error {
+	if c.cfg.Personal {
+		out, err := c.refreshOAuthToken(ctx, personalSkypeTokenScope, "")
+		if err != nil {
+			return fmt.Errorf("refresh authz bearer: %w", err)
+		}
+		return c.requestSkypeToken(ctx, out.AccessToken)
+	}
 	c.tokenLock.RLock()
 	authExpired := c.auth == nil || c.auth.Expired()
 	c.tokenLock.RUnlock()
@@ -332,27 +380,33 @@ func (c *Client) RefreshSkypeToken(ctx context.Context) error {
 			return fmt.Errorf("refresh prerequisite oauth bearer: %w", err)
 		}
 	}
-	err := c.requestSkypeToken(ctx)
+	err := c.requestSkypeToken(ctx, c.bearer())
 	if errors.Is(err, ErrTokenExpired) {
 		if rerr := c.RefreshAuthToken(ctx); rerr != nil {
 			return fmt.Errorf("recover bearer after authz 401: %w", rerr)
 		}
-		err = c.requestSkypeToken(ctx)
+		err = c.requestSkypeToken(ctx, c.bearer())
 	}
 	return err
 }
 
-func (c *Client) requestSkypeToken(ctx context.Context) error {
+func (c *Client) bearer() string {
 	c.tokenLock.RLock()
-	auth := c.auth
-	c.tokenLock.RUnlock()
-	if auth == nil || auth.Value == "" {
+	defer c.tokenLock.RUnlock()
+	if c.auth == nil {
+		return ""
+	}
+	return c.auth.Value
+}
+
+func (c *Client) requestSkypeToken(ctx context.Context, bearer string) error {
+	if bearer == "" {
 		return ErrUnauthorized
 	}
 	endpoint := c.authzURLForTest
 	if endpoint == "" {
 		endpoint = workAuthzURL
-		if c.cfg.TenantID == "" || IsConsumerTenant(c.cfg.TenantID) {
+		if c.cfg.Personal {
 			endpoint = personalAuthzURL
 		}
 	}
@@ -360,7 +414,7 @@ func (c *Client) requestSkypeToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+auth.Value)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Accept", "application/json; ver=1.0")
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
 
@@ -381,13 +435,17 @@ func (c *Client) requestSkypeToken(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return fmt.Errorf("decode authz response: %w", err)
 	}
-	if out.Tokens.SkypeToken == "" {
+	token, expiresIn := out.Tokens.SkypeToken, out.Tokens.ExpiresIn
+	if token == "" {
+		token, expiresIn = out.SkypeToken.SkypeToken, out.SkypeToken.ExpiresIn
+	}
+	if token == "" {
 		return ErrTokenInvalid
 	}
 	c.tokenLock.Lock()
-	c.skype = &Token{
-		Value:     out.Tokens.SkypeToken,
-		ExpiresAt: time.Now().Add(time.Duration(out.Tokens.ExpiresIn) * time.Second),
+	c.skype = &Token{Value: token, ExpiresAt: time.Now().Add(time.Duration(expiresIn) * time.Second)}
+	if out.SkypeToken.SkypeID != "" {
+		c.skypeID = out.SkypeToken.SkypeID
 	}
 	c.tokenLock.Unlock()
 	c.applyAuthzEndpoints(out)
@@ -399,7 +457,12 @@ func (c *Client) requestSkypeToken(ctx context.Context) error {
 // never overwrite it.
 func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 	c.tokenLock.Lock()
-	if chat := resp.RegionGtms["chatService"]; chat != "" && c.cfg.Endpoints.ChatSvcBase == "" {
+	chat := resp.RegionGtms["chatService"]
+	if c.cfg.Personal {
+		// The web client calls the consumer chat service through this front door.
+		chat = firstNonEmpty(resp.RegionGtms["chatServiceAfd"], chat)
+	}
+	if chat != "" && c.cfg.Endpoints.ChatSvcBase == "" {
 		c.chatSvcBase = chat
 	}
 	if mt := resp.RegionGtms["middleTier"]; mt != "" && c.cfg.Endpoints.MTBase == "" {
@@ -497,19 +560,24 @@ type DeviceCodeToken struct {
 var ErrDeviceCodeDeclined = errors.New("device code login declined by user")
 
 // StartDeviceCode opens an OAuth device-code flow against the Microsoft
-// identity platform using the Teams work client ID. tenant should be
-// "organizations" for work/school accounts, or a tenant GUID when already
-// known. httpClient may be nil to use http.DefaultClient.
-func StartDeviceCode(ctx context.Context, httpClient *http.Client, tenant string) (*DeviceCodeResponse, error) {
+// identity platform with the Teams client of the account type. tenant should
+// be "organizations" for work/school accounts, or a tenant GUID when already
+// known; personal accounts always use "consumers". httpClient may be nil to
+// use http.DefaultClient.
+func StartDeviceCode(ctx context.Context, httpClient *http.Client, tenant string, personal bool) (*DeviceCodeResponse, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	if tenant == "" {
+	scope := workOAuthScope
+	switch {
+	case personal:
+		tenant, scope = "consumers", personalOAuthScope
+	case tenant == "":
 		tenant = "organizations"
 	}
 	form := url.Values{}
-	form.Set("client_id", WorkOAuthClientID)
-	form.Set("scope", workOAuthScope)
+	form.Set("client_id", oauthClientID(personal))
+	form.Set("scope", scope)
 	endpoint := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/devicecode", tenant)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
@@ -546,11 +614,14 @@ func StartDeviceCode(ctx context.Context, httpClient *http.Client, tenant string
 // flow, the device code expires, or ctx is cancelled. The initial poll happens
 // after `interval`; Azure may ask us to back off via a `slow_down` response,
 // which we honour.
-func PollDeviceCode(ctx context.Context, httpClient *http.Client, tenant, deviceCode string, interval time.Duration) (*DeviceCodeToken, error) {
+func PollDeviceCode(ctx context.Context, httpClient *http.Client, tenant string, personal bool, deviceCode string, interval time.Duration) (*DeviceCodeToken, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	if tenant == "" {
+	switch {
+	case personal:
+		tenant = "consumers"
+	case tenant == "":
 		tenant = "organizations"
 	}
 	if interval <= 0 {
@@ -568,7 +639,7 @@ func PollDeviceCode(ctx context.Context, httpClient *http.Client, tenant, device
 		}
 
 		form := url.Values{}
-		form.Set("client_id", WorkOAuthClientID)
+		form.Set("client_id", oauthClientID(personal))
 		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 		form.Set("device_code", deviceCode)
 
@@ -644,6 +715,14 @@ func ParseIDToken(idToken string) (*IDTokenClaims, error) {
 }
 
 func (c *Client) ChatSvcBase() string { return c.chatSvcBaseURL() }
+
+// SkypeID is the account's Skype id as the consumer authz names it
+// ("live:.cid.<cid>"); empty for work accounts.
+func (c *Client) SkypeID() string {
+	c.tokenLock.RLock()
+	defer c.tokenLock.RUnlock()
+	return c.skypeID
+}
 
 // The endpoint fields are rewritten on a region failover while request builders
 // read them from other goroutines, so reads go through these RLock accessors.

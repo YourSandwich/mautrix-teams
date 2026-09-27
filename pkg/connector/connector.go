@@ -21,13 +21,16 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -79,10 +82,14 @@ func hiddenCommand(name string) commands.CommandHandler {
 	}
 }
 
-// loggedInClient returns the user's connected Teams client, or replies why
-// there is none.
+// loggedInClient returns the connected Teams client a command acts on, or
+// replies why there is none.
 func loggedInClient(ce *commands.Event) *TeamsClient {
-	login := ce.User.GetDefaultLogin()
+	login, err := commandLogin(ce)
+	if err != nil {
+		ce.Reply("%v", err)
+		return nil
+	}
 	if login == nil {
 		ce.Reply("You're not logged in")
 		return nil
@@ -93,6 +100,56 @@ func loggedInClient(ce *commands.Event) *TeamsClient {
 		return nil
 	}
 	return t
+}
+
+// commandLogin picks the login a command acts on and drops a leading login
+// choice from its arguments: a login ID from list-logins, or, with several
+// logins, "work" or "personal" for the only one of that kind. Without a
+// choice, a command in a portal uses the portal's login and others a work
+// login, since bridgev2's default (lowest id) would be a personal one.
+func commandLogin(ce *commands.Event) (*bridgev2.UserLogin, error) {
+	logins := ce.User.GetUserLogins()
+	if len(ce.Args) > 0 {
+		choice := ce.Args[0]
+		var matches []*bridgev2.UserLogin
+		for _, login := range logins {
+			if string(login.ID) == choice || (len(logins) > 1 && accountKind(login.ID) == strings.ToLower(choice)) {
+				matches = append(matches, login)
+			}
+		}
+		switch {
+		case len(matches) == 1:
+			ce.Args = ce.Args[1:]
+			ce.RawArgs = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ce.RawArgs), choice))
+			return matches[0], nil
+		case len(matches) > 1:
+			return nil, fmt.Errorf("you have several %s logins; name one by its ID from `list-logins`", strings.ToLower(choice))
+		}
+	}
+	if ce.Portal != nil {
+		if login, _, err := ce.Portal.FindPreferredLogin(ce.Ctx, ce.User, false); err == nil && login != nil {
+			return login, nil
+		}
+	}
+	var work *bridgev2.UserLogin
+	for _, login := range logins {
+		if accountKind(login.ID) == "work" && (work == nil || login.ID < work.ID) {
+			work = login
+		}
+	}
+	if work != nil {
+		return work, nil
+	}
+	return ce.User.GetDefaultLogin(), nil
+}
+
+// accountKind tells personal Microsoft accounts from work or school accounts
+// by their Teams id.
+func accountKind(id networkid.UserLoginID) string {
+	if strings.HasPrefix(string(id), "8:live:") {
+		return "personal"
+	}
+	return "work"
 }
 
 func (tc *TeamsConnector) Start(ctx context.Context) error {

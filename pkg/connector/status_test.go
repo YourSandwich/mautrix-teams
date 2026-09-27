@@ -49,3 +49,9 @@ func TestParseAutoReplies(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountKind(t *testing.T) {
+	if accountKind("8:live:.cid.0123456789abcdef") != "personal" || accountKind("8:orgid:00000000-0000-0000-0000-000000000001") != "work" {
+		t.Error("login kinds are told apart by the 8:live: prefix")
+	}
+}
