@@ -6,6 +6,18 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Pinned messages bridge both ways between Teams and the room's pins.
+- A group chat's picture becomes its room's avatar.
+- Reactions with a skin tone bridge both ways, and Teams acknowledgements
+  show as ✅.
+
+### Fixed
+
+- Starting a chat with someone you have never chatted with creates the
+  Teams chat first, as the web client does.
+
 ## [31.1] - 2026-09-27
 
 ### Added
