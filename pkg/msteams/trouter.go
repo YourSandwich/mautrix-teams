@@ -483,6 +483,11 @@ func (c *Client) dispatchTrouterRequest(reqURL string, body []byte) {
 			return
 		}
 		c.handleCallAgentFrame(reqURL, body)
+	case strings.HasSuffix(reqURL, "/tpsUpdate/calendar"):
+		select {
+		case c.calendarChanged <- struct{}{}:
+		default:
+		}
 	default:
 		c.log.Debug().Str("url", reqURL).Int("len", len(body)).Msg("Trouter: unhandled endpoint")
 	}

@@ -57,3 +57,6 @@ calls:
     # STUN server (host:port) the bridge uses to learn its public address for
     # call media. Leave empty to offer only the host's own addresses.
     stun_server: stun.l.google.com:19302
+    # Pin the next occurrence of each meeting from your Teams calendar in its
+    # meeting chat's room, and keep it current.
+    upcoming_meetings: false

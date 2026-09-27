@@ -106,6 +106,9 @@ func (t *TeamsClient) Connect(ctx context.Context) {
 	go t.eventLoop(loopCtx)
 	t.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	go t.syncChats(loopCtx)
+	if t.Main.Config.Calls.UpcomingMeetings {
+		go t.upcomingMeetingsLoop(loopCtx)
+	}
 }
 
 func (t *TeamsClient) persistTokens(ctx context.Context) {
