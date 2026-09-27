@@ -101,6 +101,12 @@ func (t *TeamsClient) syncChats(ctx context.Context) {
 }
 
 func (t *TeamsClient) queueChatResync(chat *msteams.Chat, info *bridgev2.ChatInfo) {
+	// Chats without pins are left alone, which saves reading every room's pins
+	// on each sync.
+	var syncPins func(context.Context, *bridgev2.Portal)
+	if len(chat.Pinned) > 0 {
+		syncPins = func(ctx context.Context, portal *bridgev2.Portal) { t.syncPins(ctx, portal, chat.Pinned) }
+	}
 	t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventChatResync,
@@ -109,6 +115,7 @@ func (t *TeamsClient) queueChatResync(chat *msteams.Chat, info *bridgev2.ChatInf
 			LogContext: func(c zerolog.Context) zerolog.Context {
 				return c.Str("teams_thread", chat.ID).Str("chat_type", string(chat.Type))
 			},
+			PostHandleFunc: syncPins,
 		},
 		ChatInfo:        info,
 		LatestMessageTS: chat.LastUpdated, // non-zero unblocks the framework's backfill gate

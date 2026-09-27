@@ -17,16 +17,12 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/rs/zerolog"
-	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
@@ -130,26 +126,4 @@ func (t *TeamsClient) setUpcomingNotice(ctx context.Context, portal *bridgev2.Po
 	}
 	meta.UpcomingText = text
 	return portal.Save(ctx)
-}
-
-// setPinned adds or removes one event and keeps the room's other pins.
-func (t *TeamsClient) setPinned(ctx context.Context, roomID id.RoomID, eventID id.EventID, pinned bool) error {
-	var content event.PinnedEventsEventContent
-	if matrix, ok := t.Main.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState); ok {
-		evt, err := matrix.GetStateEvent(ctx, roomID, event.StatePinnedEvents, "")
-		switch {
-		case errors.Is(err, mautrix.MNotFound):
-		case err != nil:
-			return fmt.Errorf("read pinned events: %w", err)
-		case evt != nil:
-			_ = evt.Content.ParseRaw(event.StatePinnedEvents)
-			content = *evt.Content.AsPinnedEvents()
-		}
-	}
-	content.Pinned = slices.DeleteFunc(content.Pinned, func(pin id.EventID) bool { return pin == eventID })
-	if pinned {
-		content.Pinned = append(content.Pinned, eventID)
-	}
-	_, err := t.Main.br.Bot.SendState(ctx, roomID, event.StatePinnedEvents, "", &event.Content{Parsed: &content}, time.Time{})
-	return err
 }

@@ -56,6 +56,8 @@ type Chat struct {
 	Meeting *MeetingRef `json:"meeting,omitempty"`
 	// Picture is the thread's picture property, set once a group chat is given one.
 	Picture string `json:"picture,omitempty"`
+	// Pinned holds the IDs of the pinned messages, newest first.
+	Pinned []string `json:"pinned,omitempty"`
 }
 
 // LiveMeeting is a call running in a chat, as Teams advertises it on the thread.
@@ -186,4 +188,6 @@ type ChatUpdate struct {
 	Topic     *string
 	// Picture reports a new or removed picture, which only the thread shows.
 	Picture bool
+	// Pins reports that messages were pinned or unpinned.
+	Pins bool
 }

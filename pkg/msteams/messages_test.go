@@ -491,6 +491,9 @@ func TestParseThreadActivity(t *testing.T) {
 	if picture := c.parseThreadActivity("ThreadActivity/PictureUpdate", ""); picture == nil || !picture.Picture {
 		t.Errorf("PictureUpdate = %+v", picture)
 	}
+	if pins := c.parseThreadActivity("ThreadActivity/PinnedItemsUpdate", ""); pins == nil || !pins.Pins {
+		t.Errorf("PinnedItemsUpdate = %+v", pins)
+	}
 	if c.parseThreadActivity("ThreadActivity/CallStarted", "<x/>") != nil {
 		t.Error("call activity must not parse as a chat update")
 	}
