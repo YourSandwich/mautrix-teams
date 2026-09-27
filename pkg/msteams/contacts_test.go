@@ -237,6 +237,43 @@ func TestCreateGroupChatIDFromRedirectedBody(t *testing.T) {
 	}
 }
 
+// An existing chat is looked up; a first chat is created the way the web
+// client creates one.
+func TestStartOneOnOne(t *testing.T) {
+	const threadID = "19:a_me@unq.gbl.spaces"
+	exists := false
+	var created map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/threads/"+threadID && exists:
+			_, _ = w.Write([]byte(`{"id":"` + threadID + `"}`))
+		case r.Method == "GET":
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == "POST" && r.URL.Path == "/v1/threads":
+			_ = json.NewDecoder(r.Body).Decode(&created)
+			w.Header().Set("Location", "https://at.ng.msg.teams.microsoft.com/v1/threads/19:a_me%40unq.gbl.spaces")
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+
+	chat, err := c.StartOneOnOne(context.Background(), "8:orgid:a")
+	if err != nil || chat.ID != threadID || chat.Type != ChatType1on1 {
+		t.Fatalf("chat=%+v err=%v", chat, err)
+	}
+	props, _ := created["properties"].(map[string]any)
+	members, _ := created["members"].([]any)
+	if props["uniquerosterthread"] != true || props["fixedRoster"] != true || len(members) != 2 {
+		t.Errorf("create body = %v", created)
+	}
+
+	exists, created = true, nil
+	if chat, err := c.StartOneOnOne(context.Background(), "8:orgid:a"); err != nil || chat.ID != threadID || created != nil {
+		t.Errorf("existing chat: chat=%+v err=%v, created %v", chat, err, created)
+	}
+}
+
 func TestThreadMemberOps(t *testing.T) {
 	var got []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
