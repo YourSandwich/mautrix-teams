@@ -178,6 +178,20 @@ func (t *TeamsClient) chatMember(mri string, membership event.Membership) bridge
 	}
 }
 
+// Ghosts the directory can't name start out named after their id, and bridgev2
+// never asks again once a name is set; messages carry the real display name.
+func (t *TeamsClient) renameFallbackGhost(ctx context.Context, mri string) {
+	name := t.Client.CachedDisplayName(mri)
+	if name == "" {
+		return
+	}
+	ghost, err := t.Main.br.GetExistingGhostByID(ctx, teamsid.MakeUserID(mri))
+	if err != nil || ghost == nil || ghost.Name != stripMRIPrefix(mri) {
+		return
+	}
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{Name: &name})
+}
+
 func (t *TeamsClient) convertSharedFiles(
 	ctx context.Context,
 	intent bridgev2.MatrixAPI,
@@ -433,6 +447,9 @@ func (t *TeamsClient) queueMessageEvent(ctx context.Context, ev msteams.Event, i
 			},
 			LogContext: func(c zerolog.Context) zerolog.Context {
 				return c.Str("teams_thread", msg.ThreadID).Str("teams_message", msg.ID)
+			},
+			PreHandleFunc: func(ctx context.Context, portal *bridgev2.Portal) {
+				t.renameFallbackGhost(ctx, msg.From)
 			},
 		},
 		Data:               msg,
