@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [31.1] - 2026-09-27
+
 ### Added
 
 - Opt-in `calls.upcoming_meetings`: each meeting chat's room keeps a pinned
