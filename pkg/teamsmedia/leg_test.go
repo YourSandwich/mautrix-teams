@@ -18,6 +18,8 @@ package teamsmedia
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +76,85 @@ func TestAudioLegLoopback(t *testing.T) {
 	exchange(callee, caller, 0x22)
 	if sent, received := caller.Stats(); sent != 5 || received != 5 {
 		t.Errorf("caller stats sent=%d received=%d", sent, received)
+	}
+}
+
+func TestAudioLegOpusPassthrough(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	offerer, err := NewAudioLeg(ctx, Config{includeLoopback: true, Opus: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer offerer.Close()
+	answerer, err := NewAudioLeg(ctx, Config{includeLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer answerer.Close()
+	errs := make(chan error, 2)
+	go func() { errs <- offerer.Connect(ctx, answerer.SDP(), true) }()
+	go func() { errs <- answerer.Connect(ctx, offerer.SDP(), false) }()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+	}
+	if answerer.Codec() != "opus" {
+		t.Fatalf("codec = %q", answerer.Codec())
+	}
+	payload := []byte{0xfc, 0xff, 0xfe}
+	go func() { _ = answerer.WriteRTP(123456, payload) }()
+	pkt, err := offerer.ReadPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkt.PayloadType != 111 || pkt.Timestamp != 123456 || pkt.SSRC != answerer.SSRC() || !bytes.Equal(pkt.Payload, payload) {
+		t.Errorf("packet pt %d ts %d ssrc %d payload %x", pkt.PayloadType, pkt.Timestamp, pkt.SSRC, pkt.Payload)
+	}
+}
+
+// The answering leg must pick the offer's Opus payload type and find the
+// sender's key among all offered ones.
+func TestAudioLegAnswersOffer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	teams, err := NewAudioLeg(ctx, Config{includeLoopback: true, Opus: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teams.Close()
+	bridge, err := NewAudioLeg(ctx, Config{includeLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+	decoy := "a=cryptoscale:1 server " + srtpSuite + " inline:" + base64.StdEncoding.EncodeToString(testKey(1)) + "|2^31|1:1\r\n"
+	offer := strings.Replace(teams.SDP(), "a=crypto:2 ", decoy+"a=crypto:2 ", 1)
+	answer, _, err := bridge.AnswerSDP(offer, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 2)
+	go func() { errs <- teams.Connect(ctx, answer, true) }()
+	go func() { errs <- bridge.Connect(ctx, offer, false) }()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+	}
+	if bridge.Codec() != "opus" || teams.Codec() != "opus" {
+		t.Fatalf("codecs = %q/%q", bridge.Codec(), teams.Codec())
+	}
+	payload := []byte{0xfc, 0xff, 0xfe}
+	go func() { _ = teams.WriteRTP(42, payload) }()
+	pkt, err := bridge.ReadPacket()
+	if err != nil || !bytes.Equal(pkt.Payload, payload) {
+		t.Fatalf("bridge got %v, %v", pkt, err)
+	}
+	go func() { _ = bridge.WriteRTP(43, payload) }()
+	if pkt, err = teams.ReadPacket(); err != nil || pkt.PayloadType != 111 {
+		t.Fatalf("teams got %v, %v", pkt, err)
 	}
 }
 
