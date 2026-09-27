@@ -124,6 +124,18 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 	portalKey := teamsid.MakePortalKey(ev.ThreadID, t.UserLogin.ID, t.splitPortals())
 	change := &bridgev2.ChatInfoChange{}
 	switch {
+	case upd.Picture:
+		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portalKey},
+			GetChatInfoFunc: func(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+				info, err := t.GetChatInfo(ctx, portal)
+				// Removed here only, so plain syncs leave avatars Teams never set alone.
+				if err == nil && info.Avatar == nil {
+					info.Avatar = &bridgev2.Avatar{Remove: true}
+				}
+				return info, err
+			},
+		})
 	case upd.Topic == nil:
 	case *upd.Topic == "":
 		// A cleared topic falls back to a name built from the roster, which

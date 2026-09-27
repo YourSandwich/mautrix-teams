@@ -180,6 +180,15 @@ func (t *TeamsClient) wrapChatInfo(ctx context.Context, chat *msteams.Chat) *bri
 			info.Name = ptr.Ptr(name)
 		}
 	}
+	if chat.Picture != "" {
+		info.Avatar = &bridgev2.Avatar{
+			ID: networkid.AvatarID(chat.Picture),
+			Get: func(ctx context.Context) ([]byte, error) {
+				data, _, err := t.Client.FetchChatPicture(ctx, chat.ID, chat.Picture)
+				return data, err
+			},
+		}
+	}
 	memberMap := make(map[networkid.UserID]bridgev2.ChatMember, len(chat.Members)+1)
 	for _, m := range chat.Members {
 		uid := teamsid.MakeUserID(m.MRI)
