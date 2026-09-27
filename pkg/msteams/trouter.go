@@ -536,13 +536,23 @@ func (c *Client) handleRingFrame(body []byte) {
 				DisplayName string `json:"displayName"`
 			} `json:"from"`
 			To struct {
-				ID          string `json:"id"`
-				DisplayName string `json:"displayName"`
+				ID            string `json:"id"`
+				DisplayName   string `json:"displayName"`
+				ParticipantID string `json:"participantId"`
 			} `json:"to"`
+			Links struct {
+				Attach string `json:"attach"`
+			} `json:"links"`
+			MediaContent struct {
+				ContentType string `json:"contentType"`
+				Blob        string `json:"blob"`
+				MediaLegID  string `json:"mediaLegId"`
+			} `json:"mediaContent"`
 		} `json:"callNotification"`
 		ConversationInvitation struct {
-			IsMultiParty bool `json:"isMultiParty"`
-			IsBroadcast  bool `json:"isBroadcast"`
+			ConversationController string `json:"conversationController"`
+			IsMultiParty           bool   `json:"isMultiParty"`
+			IsBroadcast            bool   `json:"isBroadcast"`
 		} `json:"conversationInvitation"`
 		DebugContent struct {
 			CallID string `json:"callId"`
@@ -595,6 +605,20 @@ func (c *Client) handleRingFrame(body []byte) {
 			CallLog:     cl,
 		},
 	}, inv.CallNotification.From.DisplayName)
+	n := inv.CallNotification
+	if n.Links.Attach == "" || n.MediaContent.Blob == "" || inv.ConversationInvitation.ConversationController == "" {
+		c.log.Debug().Str("call_id", cl.CallID).Msg("Incoming call push has nothing to answer it with")
+		return
+	}
+	select {
+	case c.incoming <- &IncomingCall{
+		CallID: cl.CallID, From: from, FromName: n.From.DisplayName, ThreadID: threadID, Offer: n.MediaContent.Blob,
+		participant: n.To.ParticipantID, attachURL: n.Links.Attach, controller: inv.ConversationInvitation.ConversationController,
+		offerType: n.MediaContent.ContentType, mediaLegID: n.MediaContent.MediaLegID,
+	}:
+	default:
+		c.log.Warn().Str("call_id", cl.CallID).Msg("Incoming call queue full; not ringing in Matrix")
+	}
 }
 
 func (c *Client) shouldEmitRing(callID string) bool {
@@ -656,7 +680,9 @@ func (c *Client) handleCallAgentFrame(reqURL string, body []byte) {
 			}
 		}
 	}
-	if threadID == "" {
+	// Late frames for the bridge's own calls end in an event name, such as
+	// conversationUpdate; thread IDs look like 19:... or 8:....
+	if !strings.Contains(threadID, ":") {
 		return
 	}
 	from := env.Initiator.MRI

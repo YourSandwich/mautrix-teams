@@ -17,8 +17,10 @@ package msteams
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,5 +86,38 @@ func TestCalendarPushSignals(t *testing.T) {
 	case <-c.CalendarChanged():
 		t.Error("pushes before a refresh should coalesce into one signal")
 	default:
+	}
+}
+
+func TestCreateMeeting(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/beta/me/calendarEvents/privateMeeting/schedulingService/create" ||
+			r.Header.Get("Authorization") != "Bearer aad" || r.Header.Get("X-Skypetoken") != "skype" {
+			t.Errorf("unexpected %s %s %v", r.Method, r.URL.Path, r.Header)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"value":{"groupContext":{"threadId":"19:meeting_abc@thread.v2"},` +
+			`"links":{"join":"https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%7d",` +
+			`"shortJoinUrl":"https://teams.microsoft.com/meet/312345678901234?p=Ex4mple"}},` +
+			`"type":"Microsoft.SkypeSpaces.MiddleTier.Models.SchedulingServiceMeetingEvent"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:me", AuthToken: "aad", SkypeToken: "skype", Endpoints: Endpoints{MTBase: srv.URL}, Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	meeting, err := c.CreateMeeting(context.Background(), "Planning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["meetingType"] != "MeetNow" || body["subject"] != "Planning" || body["unhideChatThread"] != true {
+		t.Errorf("body = %v", body)
+	}
+	if meeting.ThreadID != "19:meeting_abc@thread.v2" || meeting.ShortJoinURL != "https://teams.microsoft.com/meet/312345678901234?p=Ex4mple" ||
+		!strings.Contains(meeting.JoinURL, "/l/meetup-join/") {
+		t.Errorf("meeting = %+v", meeting)
 	}
 }

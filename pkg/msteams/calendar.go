@@ -17,6 +17,7 @@ package msteams
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"time"
 )
@@ -29,9 +30,11 @@ type CalendarEvent struct {
 	Cancelled bool
 	// The user's calendar offset from UTC at the time of the event.
 	UTCOffset time.Duration
-	// Set for Teams meetings: the meeting chat and its join link.
-	ThreadID string
-	JoinURL  string
+	// Set for Teams meetings: the meeting chat and its join links; Teams
+	// gives the short one (/meet/<id>?p=) for some meetings only.
+	ThreadID     string
+	JoinURL      string
+	ShortJoinURL string
 }
 
 type rawCalendarEvent struct {
@@ -41,6 +44,7 @@ type rawCalendarEvent struct {
 	IsCancelled          bool    `json:"isCancelled"`
 	UTCOffset            float64 `json:"utcOffset"`
 	SkypeTeamsMeetingURL string  `json:"skypeTeamsMeetingUrl"`
+	ShortJoinURL         string  `json:"shortOnlineMeetingJoinUrl"`
 	SkypeTeamsDataObject struct {
 		CID string `json:"cid"`
 	} `json:"skypeTeamsDataObject"`
@@ -71,14 +75,54 @@ func (c *Client) ListCalendar(ctx context.Context, from, to time.Time) ([]Calend
 			continue
 		}
 		events = append(events, CalendarEvent{
-			Subject:   r.Subject,
-			Start:     start,
-			End:       end,
-			Cancelled: r.IsCancelled,
-			UTCOffset: time.Duration(r.UTCOffset * float64(time.Minute)),
-			ThreadID:  r.SkypeTeamsDataObject.CID,
-			JoinURL:   r.SkypeTeamsMeetingURL,
+			Subject:      r.Subject,
+			Start:        start,
+			End:          end,
+			Cancelled:    r.IsCancelled,
+			UTCOffset:    time.Duration(r.UTCOffset * float64(time.Minute)),
+			ThreadID:     r.SkypeTeamsDataObject.CID,
+			JoinURL:      r.SkypeTeamsMeetingURL,
+			ShortJoinURL: r.ShortJoinURL,
 		})
 	}
 	return events, nil
+}
+
+// CreatedMeeting is a meeting the user just created: its join links and the
+// thread of its chat.
+type CreatedMeeting struct {
+	// A /meet/ link for personal accounts, a meetup-join link for work ones.
+	JoinURL string
+	// The short /meet/ link work accounts also get, which is nicer to share.
+	ShortJoinURL string
+	ThreadID     string
+}
+
+// CreateMeeting creates a meeting to hold now, as the web client's Meet now
+// does, with its chat shown in the user's chat list.
+func (c *Client) CreateMeeting(ctx context.Context, subject string) (*CreatedMeeting, error) {
+	var resp struct {
+		Value struct {
+			GroupContext struct {
+				ThreadID string `json:"threadId"`
+			} `json:"groupContext"`
+			Links struct {
+				Join         string `json:"join"`
+				ShortJoinURL string `json:"shortJoinUrl"`
+			} `json:"links"`
+		} `json:"value"`
+	}
+	body := map[string]any{"meetingType": "MeetNow", "isStreamEnabled": false, "subject": subject, "unhideChatThread": true}
+	endpoint := c.mtBaseURL() + "/beta/me/calendarEvents/privateMeeting/schedulingService/create"
+	if err := c.doJSON(ctx, "POST", endpoint, AuthBearerSkype, body, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Value.Links.Join == "" {
+		return nil, errors.New("teams returned no join link for the new meeting")
+	}
+	return &CreatedMeeting{
+		JoinURL:      resp.Value.Links.Join,
+		ShortJoinURL: resp.Value.Links.ShortJoinURL,
+		ThreadID:     resp.Value.GroupContext.ThreadID,
+	}, nil
 }

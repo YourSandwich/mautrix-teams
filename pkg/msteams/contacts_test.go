@@ -19,10 +19,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -250,5 +253,35 @@ func TestThreadMemberOps(t *testing.T) {
 	want := []string{"PUT /v1/threads/19:x@thread.v2/members/8:orgid:a", "DELETE /v1/threads/19:x@thread.v2/members/8:orgid:a"}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseLiveMeeting(t *testing.T) {
+	future := time.Now().Add(time.Hour).Unix()
+	raw := fmt.Sprintf(`{"conversationUrl":"https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-x/conv/abc?i=1","conversationId":"abc",`+
+		`"groupCallInitiator":"8:orgid:a","expiration":%d,"status":"Active","callStartTime":"2026-09-26T13:53:35.9454251Z",`+
+		`"conversationType":"scheduledMeeting","isHostless":true,"meetingInfo":{"organizerId":"o","tenantId":"t","isBroadcast":false},`+
+		`"meetingData":{"meetingCode":"1","passcode":"p"}}`, future)
+	live := parseLiveMeeting(raw)
+	if live == nil || live.Initiator != "8:orgid:a" || live.OrganizerID != "o" || live.TenantID != "t" ||
+		live.Started.IsZero() || live.Expires.Unix() != future || live.ConversationURL == "" || live.MeetingCode != "1" {
+		t.Fatalf("live = %+v", live)
+	}
+	past := strings.Replace(raw, fmt.Sprint(future), fmt.Sprint(time.Now().Add(-time.Minute).Unix()), 1)
+	for name, in := range map[string]string{"expired": past, "ended": strings.Replace(raw, `"Active"`, `"Ended"`, 1), "empty": "", "garbage": "{"} {
+		if parseLiveMeeting(in) != nil {
+			t.Errorf("%s: want no live meeting", name)
+		}
+	}
+}
+
+func TestMeetingChatProperties(t *testing.T) {
+	meeting := `{"subject":"Weekly Sync","organizerId":"o","tenantId":"t","meetingType":"Scheduled","meetingJoinUrl":"https://teams.microsoft.com/l/meetup-join/x"}`
+	chat := convertRawConversation(&rawConversation{ID: "19:meeting_x@thread.v2", Properties: rawThreadProps{ThreadType: "meeting", Meeting: meeting}})
+	if chat.Type != ChatTypeMeeting || chat.Topic != "Weekly Sync" || chat.Meeting == nil || *chat.Meeting != (MeetingRef{TenantID: "t", OrganizerID: "o"}) {
+		t.Errorf("chat = %+v, meeting %+v", chat, chat.Meeting)
+	}
+	if plain := convertRawConversation(&rawConversation{ID: "19:x@thread.v2", Properties: rawThreadProps{Topic: "Group"}}); plain.Meeting != nil {
+		t.Errorf("a chat without a meeting property got %+v", plain.Meeting)
 	}
 }
