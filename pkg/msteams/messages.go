@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type SendOptions struct {
@@ -236,10 +237,15 @@ func (c *Client) reactionEndpoint(threadID, messageID string) string {
 		"/messages/" + url.PathEscape(messageID) + "/properties?name=emotions"
 }
 
+// noSkinTone precedes the five skin tone modifiers, which Teams numbers
+// tone1 to tone5.
+const noSkinTone = 0x1F3FA
+
 // TeamsReactionKey returns the Teams reaction key for a Matrix emoji. Uses
 // the Teams emoji catalog (legacy short names like "cool" / "heart" and the
-// modern "<hex>_<name>" ids). Emojis missing from the catalog pass through
-// unchanged so Teams still stores them, just without a rendered bubble.
+// modern "<hex>_<name>" ids); a skin tone becomes a "-tone<n>" suffix. Emojis
+// missing from the catalog pass through unchanged so Teams still stores
+// them, just without a rendered bubble.
 func TeamsReactionKey(emoji string) string {
 	if id, ok := teamsEmojiID[emoji]; ok {
 		return id
@@ -253,6 +259,14 @@ func TeamsReactionKey(emoji string) string {
 	} else if id, ok := teamsEmojiID[emoji+"\uFE0F"]; ok {
 		return id
 	}
+	for i, r := range emoji {
+		if tone := r - noSkinTone; tone >= 1 && tone <= 5 {
+			if id, ok := teamsToneEmojiID[emoji[:i]+emoji[i+utf8.RuneLen(r):]]; ok {
+				return id + "-tone" + strconv.Itoa(int(tone))
+			}
+			break
+		}
+	}
 	return emoji
 }
 
@@ -264,6 +278,15 @@ func DecodeReactionKey(key string) string {
 	if emoji, ok := teamsEmojiReverse[key]; ok {
 		return emoji
 	}
+	if base, tone, ok := strings.Cut(key, "-tone"); ok && len(tone) == 1 && tone[0] >= '1' && tone[0] <= '5' {
+		if emoji, ok := teamsEmojiReverse[base]; ok {
+			return withSkinTone(emoji, noSkinTone+rune(tone[0]-'0'))
+		}
+	}
+	// Teams keeps message acknowledgements among the reactions, outside the catalog.
+	if key == "acks" {
+		return "✅"
+	}
 	hexPart := key
 	if i := strings.Index(key, "_"); i >= 0 {
 		hexPart = key[:i]
@@ -272,6 +295,17 @@ func DecodeReactionKey(key string) string {
 		return string(rune(n))
 	}
 	return key
+}
+
+// withSkinTone puts a skin tone where the Teams client does: on the first
+// person of a ZWJ sequence, in place of its variation selector.
+func withSkinTone(emoji string, tone rune) string {
+	head, tail, zwj := strings.Cut(emoji, "\u200d")
+	head = strings.TrimSuffix(head, "\uFE0F") + string(tone)
+	if zwj {
+		return head + "\u200d" + tail
+	}
+	return head
 }
 
 type HistoryOptions struct {

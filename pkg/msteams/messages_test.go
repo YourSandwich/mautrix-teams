@@ -300,6 +300,11 @@ func TestTeamsReactionKeyEncoding(t *testing.T) {
 		{"heart", "heart"}, // already-encoded key passes through unchanged
 		{"👍", "like"},
 		{"like", "like"},
+		{"👍🏼", "yes-tone2"}, // "like" takes no skin tone
+		{"yes-tone2", "yes-tone2"},
+		{"🖐🏿", "1f590_handwithfingerssplayed-tone5"},
+		{"🏋🏽‍♂️", "manliftingweights-tone3"},
+		{"❤️🏼", "❤️🏼"},                   // no tone on a catalog entry without one
 		{"not-an-emoji", "not-an-emoji"}, // unknown input is left as-is
 	}
 	for _, c := range cases {
@@ -309,6 +314,28 @@ func TestTeamsReactionKeyEncoding(t *testing.T) {
 	}
 	if got := DecodeReactionKey(TeamsReactionKey("👍")); got != "👍" {
 		t.Errorf("glyph did not survive key round-trip: got %q", got)
+	}
+}
+
+func TestDecodeReactionKey(t *testing.T) {
+	for key, want := range map[string]string{
+		"yes-tone1":               "👍🏻",
+		"handsinair-tone2":        "🙌🏼",
+		"manliftingweights-tone3": "🏋🏽‍♂️",
+		"yes-tone6":               "yes-tone6",
+		"acks":                    "✅",
+	} {
+		if got := DecodeReactionKey(key); got != want {
+			t.Errorf("DecodeReactionKey(%q) = %q, want %q", key, got, want)
+		}
+	}
+	for _, id := range teamsToneEmojiID {
+		for tone := '1'; tone <= '5'; tone++ {
+			key := id + "-tone" + string(tone)
+			if got := TeamsReactionKey(DecodeReactionKey(key)); got != key {
+				t.Errorf("%s came back as %s", key, got)
+			}
+		}
 	}
 }
 
