@@ -488,6 +488,9 @@ func TestParseThreadActivity(t *testing.T) {
 	if got := c.CachedDisplayName("8:orgid:d"); got != "" {
 		t.Errorf("unresolved orgid name should not be cached, got %q", got)
 	}
+	if picture := c.parseThreadActivity("ThreadActivity/PictureUpdate", ""); picture == nil || !picture.Picture {
+		t.Errorf("PictureUpdate = %+v", picture)
+	}
 	if c.parseThreadActivity("ThreadActivity/CallStarted", "<x/>") != nil {
 		t.Error("call activity must not parse as a chat update")
 	}

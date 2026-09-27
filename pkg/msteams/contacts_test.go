@@ -322,3 +322,34 @@ func TestMeetingChatProperties(t *testing.T) {
 		t.Errorf("a chat without a meeting property got %+v", plain.Meeting)
 	}
 }
+
+// /conversations and /threads carry the picture under different keys; the
+// picture service wants the part after the last "@" as the document.
+func TestChatPicture(t *testing.T) {
+	const picture = "etag@https://example/objects/0-x/views/avatar_fullsize?a=b"
+	for _, r := range []rawConversation{{ThreadProperties: rawThreadProps{Picture: picture}}, {Properties: rawThreadProps{Picture: picture}}} {
+		if got := convertRawConversation(&r).Picture; got != picture {
+			t.Errorf("picture = %q", got)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/beta/users/me/threads/19:group@thread.v2/properties/pictureV2" ||
+			q.Get("documentUrl") != "https://example/objects/0-x/views/avatar_fullsize?a=b" || q.Get("size") != "HR196x196" {
+			t.Errorf("unexpected %s", r.URL)
+		}
+		if r.Header.Get("Authorization") != "" || !strings.Contains(r.Header.Get("Cookie"), "authtoken=Bearer=aad") {
+			t.Error("the picture service takes cookie auth only")
+		}
+		_, _ = w.Write([]byte("png"))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:me", AuthToken: "aad", Endpoints: Endpoints{MTBase: srv.URL}, Logger: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if data, _, err := c.FetchChatPicture(context.Background(), "19:group@thread.v2", picture); err != nil || string(data) != "png" {
+		t.Errorf("data=%q err=%v", data, err)
+	}
+}

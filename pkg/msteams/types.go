@@ -54,6 +54,8 @@ type Chat struct {
 	LiveMeeting *LiveMeeting `json:"liveMeeting,omitempty"`
 	// Meeting is set for the chat of a scheduled or ad hoc meeting.
 	Meeting *MeetingRef `json:"meeting,omitempty"`
+	// Picture is the thread's picture property, set once a group chat is given one.
+	Picture string `json:"picture,omitempty"`
 }
 
 // LiveMeeting is a call running in a chat, as Teams advertises it on the thread.
@@ -182,4 +184,6 @@ type ChatUpdate struct {
 	Joined    []string
 	Left      []string
 	Topic     *string
+	// Picture reports a new or removed picture, which only the thread shows.
+	Picture bool
 }

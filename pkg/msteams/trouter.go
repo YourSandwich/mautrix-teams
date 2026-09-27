@@ -886,6 +886,8 @@ func (c *Client) parseThreadActivity(messageType, content string) *ChatUpdate {
 			return &ChatUpdate{Joined: ids}
 		}
 		return &ChatUpdate{Left: ids}
+	case "ThreadActivity/PictureUpdate":
+		return &ChatUpdate{Picture: true}
 	}
 	return nil
 }

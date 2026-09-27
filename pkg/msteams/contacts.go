@@ -49,6 +49,7 @@ type rawThreadProps struct {
 	ThreadType         string `json:"threadType"`
 	Meeting            string `json:"meeting"`
 	UniqueRosterThread string `json:"uniquerosterthread"`
+	Picture            string `json:"picture"`
 	ProductThreadType  string `json:"productThreadType"`
 	LiveState          string `json:"awareness_conversationLiveState:0"`
 }
@@ -417,17 +418,28 @@ func profileToUser(r *rawUserProfile) User {
 	}
 }
 
-// FetchAvatar downloads a user's profile picture using browser-style cookie
-// auth (the asset endpoint rejects Authorization headers).
+// FetchAvatar downloads a user's profile picture.
 func (c *Client) FetchAvatar(ctx context.Context, mri string) ([]byte, string, error) {
 	if mri == "" {
 		return nil, "", fmt.Errorf("empty mri")
 	}
+	return c.fetchPicture(ctx, "/profilepicturev2/"+mri)
+}
+
+// FetchChatPicture downloads the picture a group chat was given, which the web
+// client names by the last "@" part of the thread's picture property.
+func (c *Client) FetchChatPicture(ctx context.Context, threadID, picture string) ([]byte, string, error) {
+	return c.fetchPicture(ctx, "/threads/"+url.PathEscape(threadID)+"/properties/pictureV2?usersInfo=null&size=HR196x196&documentUrl="+
+		url.QueryEscape(picture[strings.LastIndexByte(picture, '@')+1:]))
+}
+
+// fetchPicture downloads a picture under the user's image service path using
+// browser-style cookie auth (the asset endpoint rejects Authorization headers).
+func (c *Client) fetchPicture(ctx context.Context, path string) ([]byte, string, error) {
 	if c.cfg.UserMRI == "" {
 		return nil, "", fmt.Errorf("client missing self mri")
 	}
-	selfOID := strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")
-	endpoint := c.mtBaseURL() + "/beta/users/" + url.PathEscape(selfOID) + "/profilepicturev2/" + mri
+	endpoint := c.mtBaseURL() + "/beta/users/" + url.PathEscape(strings.TrimPrefix(c.cfg.UserMRI, "8:orgid:")) + path
 	if err := c.ensureFreshTokens(ctx, true, false); err != nil {
 		return nil, "", err
 	}
@@ -458,7 +470,7 @@ func (c *Client) FetchAvatar(ctx context.Context, mri string) ([]byte, string, e
 	}
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("avatar fetch %s: %d %s", mri, resp.StatusCode, string(body))
+		return nil, "", fmt.Errorf("picture fetch %s: %d %s", path, resp.StatusCode, string(body))
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 	if err != nil {
@@ -860,8 +872,9 @@ func convertRawConversation(r *rawConversation) Chat {
 		meeting = parseMeetingProperty(&r.ThreadProperties)
 	}
 	c := Chat{
-		ID:    r.ID,
-		Topic: firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meeting.Subject),
+		ID:      r.ID,
+		Topic:   firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meeting.Subject),
+		Picture: firstNonEmpty(r.ThreadProperties.Picture, r.Properties.Picture),
 	}
 	if meeting.OrganizerID != "" && meeting.TenantID != "" {
 		c.Meeting = &MeetingRef{TenantID: meeting.TenantID, OrganizerID: meeting.OrganizerID}
