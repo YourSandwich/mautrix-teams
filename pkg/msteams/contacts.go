@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type conversationsResponse struct {
@@ -49,6 +50,7 @@ type rawThreadProps struct {
 	Meeting            string `json:"meeting"`
 	UniqueRosterThread string `json:"uniquerosterthread"`
 	ProductThreadType  string `json:"productThreadType"`
+	LiveState          string `json:"awareness_conversationLiveState:0"`
 }
 
 type rawMember struct {
@@ -846,9 +848,16 @@ func (c *Client) threadMemberURL(threadID, mri string) string {
 }
 
 func convertRawConversation(r *rawConversation) Chat {
+	meeting := parseMeetingProperty(&r.Properties)
+	if meeting == (meetingProperty{}) {
+		meeting = parseMeetingProperty(&r.ThreadProperties)
+	}
 	c := Chat{
 		ID:    r.ID,
-		Topic: firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meetingSubject(&r.Properties), meetingSubject(&r.ThreadProperties)),
+		Topic: firstNonEmpty(r.ThreadProperties.Topic, r.Properties.Topic, meeting.Subject),
+	}
+	if meeting.OrganizerID != "" && meeting.TenantID != "" {
+		c.Meeting = &MeetingRef{TenantID: meeting.TenantID, OrganizerID: meeting.OrganizerID}
 	}
 	c.Type = classifyChat(r)
 	for _, m := range r.Members {
@@ -864,6 +873,7 @@ func convertRawConversation(r *rawConversation) Chat {
 	if r.LastMessage != nil {
 		c.LastUpdated = ParseTeamsTime(r.LastMessage.ComposeTime)
 	}
+	c.LiveMeeting = parseLiveMeeting(firstNonEmpty(r.ThreadProperties.LiveState, r.Properties.LiveState))
 	// /conversations omits members for 1:1 DMs - both peers are encoded in
 	// the thread id itself.
 	if len(c.Members) == 0 {
@@ -905,17 +915,56 @@ func isMeeting(p *rawThreadProps) bool {
 	return strings.EqualFold(p.ChatType, "meeting") || strings.EqualFold(p.ThreadType, "meeting")
 }
 
-func meetingSubject(p *rawThreadProps) string {
-	if p == nil || p.Meeting == "" {
-		return ""
+// parseLiveMeeting reads the JSON-in-JSON the thread carries while a call runs
+// in it; nil when there is none or it is over.
+func parseLiveMeeting(raw string) *LiveMeeting {
+	if raw == "" {
+		return nil
 	}
-	var m struct {
-		Subject string `json:"subject"`
+	var state struct {
+		ConversationURL    string `json:"conversationUrl"`
+		GroupCallInitiator string `json:"groupCallInitiator"`
+		Status             string `json:"status"`
+		CallStartTime      string `json:"callStartTime"`
+		Expiration         int64  `json:"expiration"`
+		MeetingInfo        struct {
+			OrganizerID string `json:"organizerId"`
+			TenantID    string `json:"tenantId"`
+		} `json:"meetingInfo"`
+		MeetingData struct {
+			MeetingCode string `json:"meetingCode"`
+		} `json:"meetingData"`
 	}
-	if json.Unmarshal([]byte(p.Meeting), &m) != nil {
-		return ""
+	if json.Unmarshal([]byte(raw), &state) != nil || state.Status != "Active" || state.ConversationURL == "" {
+		return nil
 	}
-	return m.Subject
+	live := &LiveMeeting{
+		ConversationURL: state.ConversationURL,
+		Initiator:       state.GroupCallInitiator,
+		Started:         ParseTeamsTime(state.CallStartTime),
+		Expires:         time.Unix(state.Expiration, 0),
+		OrganizerID:     state.MeetingInfo.OrganizerID,
+		TenantID:        state.MeetingInfo.TenantID,
+		MeetingCode:     state.MeetingData.MeetingCode,
+	}
+	if state.Expiration != 0 && time.Now().After(live.Expires) {
+		return nil
+	}
+	return live
+}
+
+type meetingProperty struct {
+	Subject     string `json:"subject"`
+	OrganizerID string `json:"organizerId"`
+	TenantID    string `json:"tenantId"`
+}
+
+func parseMeetingProperty(p *rawThreadProps) meetingProperty {
+	var m meetingProperty
+	if p.Meeting != "" {
+		_ = json.Unmarshal([]byte(p.Meeting), &m)
+	}
+	return m
 }
 
 func ChatTypeForID(id string) ChatType {

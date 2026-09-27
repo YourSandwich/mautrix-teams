@@ -54,6 +54,8 @@ func TestAttachAuth(t *testing.T) {
 		{AuthBearer, "Authorization", "Bearer auth-value", false},
 		{AuthSkype, "Authentication", "skypetoken=skype-value", false},
 		{AuthRegistration, "RegistrationToken", "registrationToken=skype-value", false},
+		{AuthBearerSkype, "Authorization", "Bearer auth-value", false},
+		{AuthBearerSkype, "X-Skypetoken", "skype-value", false},
 	}
 	for _, tc := range tests {
 		req, _ := http.NewRequest("GET", "http://example/x", nil)

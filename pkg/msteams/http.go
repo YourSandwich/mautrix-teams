@@ -32,6 +32,7 @@ const (
 	AuthBearer                // Authorization: Bearer <auth token> (AAD JWT)
 	AuthSkype                 // Authentication: skypetoken=<token>
 	AuthRegistration          // RegistrationToken: registrationToken=<value>
+	AuthBearerSkype           // AuthBearer plus X-Skypetoken, as the middle tier's meeting scheduling wants
 )
 
 // doJSON sends a JSON request and decodes a JSON response. One 401 retry is
@@ -43,7 +44,8 @@ func (c *Client) doJSON(ctx context.Context, method, url string, auth AuthKind, 
 }
 
 func (c *Client) doJSONHeaders(ctx context.Context, method, url string, auth AuthKind, body, out any) (http.Header, error) {
-	if err := c.ensureFreshTokens(ctx, auth == AuthBearer, auth == AuthSkype || auth == AuthRegistration); err != nil {
+	bearer, skype := auth == AuthBearer || auth == AuthBearerSkype, auth == AuthSkype || auth == AuthRegistration || auth == AuthBearerSkype
+	if err := c.ensureFreshTokens(ctx, bearer, skype); err != nil {
 		return nil, err
 	}
 	hdr, err := c.sendJSON(ctx, method, url, auth, body, out)
@@ -125,6 +127,11 @@ func (c *Client) reauth(ctx context.Context, auth AuthKind) error {
 		return c.RefreshAuthToken(ctx)
 	case AuthSkype, AuthRegistration:
 		return c.RefreshSkypeToken(ctx)
+	case AuthBearerSkype:
+		if err := c.RefreshAuthToken(ctx); err != nil {
+			return err
+		}
+		return c.RefreshSkypeToken(ctx)
 	default:
 		return ErrUnauthorized
 	}
@@ -157,6 +164,12 @@ func (c *Client) attachAuth(req *http.Request, kind AuthKind) error {
 			return ErrUnauthorized
 		}
 		req.Header.Set("RegistrationToken", "registrationToken="+c.skype.Value)
+	case AuthBearerSkype:
+		if c.auth == nil || c.auth.Value == "" || c.skype == nil || c.skype.Value == "" {
+			return ErrUnauthorized
+		}
+		req.Header.Set("Authorization", "Bearer "+c.auth.Value)
+		req.Header.Set("X-Skypetoken", c.skype.Value)
 	default:
 		return fmt.Errorf("unknown auth kind %d", kind)
 	}

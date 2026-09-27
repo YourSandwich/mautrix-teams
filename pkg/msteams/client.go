@@ -81,6 +81,8 @@ type Client struct {
 	http   *http.Client
 	log    zerolog.Logger
 	events chan Event
+	// One-to-one calls ringing the user, for the connector to ring in Matrix.
+	incoming chan *IncomingCall
 	// Kept apart from events so a full event queue can't drop them.
 	resyncNeeded    chan struct{}
 	calendarChanged chan struct{}
@@ -250,6 +252,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		http:            &http.Client{Timeout: 60 * time.Second},
 		log:             cfg.Logger.With().Str("component", "msteams").Logger(),
 		events:          make(chan Event, 256),
+		incoming:        make(chan *IncomingCall, 4),
 		resyncNeeded:    make(chan struct{}, 1),
 		calendarChanged: make(chan struct{}, 1),
 		skype:           &Token{Value: cfg.SkypeToken},

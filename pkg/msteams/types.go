@@ -50,7 +50,22 @@ type Chat struct {
 	Members     []Member  `json:"members,omitempty"`
 	LastUpdated time.Time `json:"lastUpdatedTime,omitempty"`
 	// TeamID is set when Type == ChatTypeChannel.
-	TeamID string `json:"teamId,omitempty"`
+	TeamID      string       `json:"teamId,omitempty"`
+	LiveMeeting *LiveMeeting `json:"liveMeeting,omitempty"`
+	// Meeting is set for the chat of a scheduled or ad hoc meeting.
+	Meeting *MeetingRef `json:"meeting,omitempty"`
+}
+
+// LiveMeeting is a call running in a chat, as Teams advertises it on the thread.
+type LiveMeeting struct {
+	ConversationURL string
+	Initiator       string
+	Started         time.Time
+	Expires         time.Time
+	OrganizerID     string
+	TenantID        string
+	// The meeting ID of its short join link.
+	MeetingCode string
 }
 
 type Team struct {
