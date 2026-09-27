@@ -75,20 +75,20 @@ as a downloadable attachment rather than an inline player.
   group creation from Matrix.
 - [x] Catch-up after Trouter message loss.
 
-## Phase 7: calls - started
+## Phase 7: calls - mostly done
 
 - [x] Teams audio media leg (ICE, SDES-SRTP, PCMU) in `pkg/teamsmedia`.
 - [x] Outgoing Teams call signalling and the `call-test` command, verified on a
   production tenant with audio both ways.
-- [ ] Join bridged audio to Element Call (MatrixRTC on LiveKit), off by default
-  behind `calls.element_call`: membership events, LiveKit token, Opus/PCMU
-  transcoding, media E2EE in encrypted rooms.
-- [ ] Incoming Teams calls (needs captures of the ring payload's attach step).
-- [ ] Video (X-H264UC packetisation and Microsoft RTCP feedback), meetings,
-  screen sharing.
+- [x] Meetings and group calls in Element Call (MatrixRTC on LiveKit), off by
+  default behind `calls.element_call`: Opus both ways, Teams participants as
+  call members, raised hands, mute and lobby admission.
+- [x] Camera video and screen sharing both ways (`calls.video`); creating
+  meetings and joining any meeting by link or code.
+- [ ] One-to-one calls both ways (direct, DTLS-keyed calls) - in progress.
+- [ ] Calls in encrypted rooms (media E2EE).
 
 ## Non-goals
 
-- Hosting meetings or presenting.
 - Guest / federated / external tenant access (out of scope for v1).
 - Admin / compliance APIs that require application permissions.

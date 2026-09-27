@@ -9,19 +9,13 @@ Azure app registration, tenant admin consent, or a paid Microsoft
 Communication Services SDK. Personal Microsoft accounts (Teams free) have
 their own login flow, which is new and not yet verified end to end.
 
-## Maintenance
-
-Looking for a new maintainer. I don't plan to keep running this long term.
-Ideal outcome is a transfer into the [mautrix](https://github.com/mautrix)
-org as `mautrix/teams`. Otherwise happy to hand the repo to any capable
-maintainer willing to take it over fully. Open an issue if you're
-interested.
-
 ## Status
 
-Functional. Most day-to-day chat features round-trip in both directions; calls
-and a couple of niche Teams-only features are still stubs (see the matrix
-below).
+Functional. Most day-to-day chat features round-trip in both directions.
+Teams meetings and group calls can be joined from Element Call with audio,
+camera video and screen sharing, and meetings can be created from Matrix.
+One-to-one calls are work in progress, and a couple of niche Teams-only
+features are not bridged yet (see the matrix below).
 
 ## Features
 
@@ -61,7 +55,18 @@ below).
 | Group creation                                | yes             | -               |
 | Call notices (started / ended / recording)    | -               | yes             |
 | Call join link (click-through to Teams)       | -               | yes             |
-| Call media bridging                           | -               | -               |
+| Meeting/group calls via Element Call (opt-in) | yes             | yes             |
+| Meeting participants as call members          | -               | yes             |
+| Meeting camera video (opt-in)                 | yes             | yes             |
+| Meeting screen share (opt-in)                 | yes             | yes             |
+| Raised hands and mute in meetings             | yes             | yes             |
+| Upcoming meeting notice (opt-in)              | -               | yes             |
+| Join any meeting by link or code              | yes             | -               |
+| Create a meeting to invite people to          | yes             | -               |
+| Ring a Teams user into a meeting (invite)     | yes             | -               |
+| Admit from a meeting's lobby (reaction)       | yes             | -               |
+| One-to-one calls (Element Call)               | in progress     | in progress     |
+| Own status, status note, out of office        | yes             | -               |
 | Teams audio call self-test (`call-test`)      | yes             | -               |
 | End-to-bridge encryption                      | yes             | yes             |
 | End-to-end encryption (Teams side)            | -               | -               |
@@ -172,6 +177,73 @@ knobs:
 - `calls.stun_server` - STUN server the bridge uses to learn its public
   address for call media (empty offers only the host's own addresses)
 
+## Calls with Element Call
+
+`calls.element_call` bridges Teams meetings and calls to and from Element Call.
+Besides the bridge it needs a working MatrixRTC setup on the homeserver, the
+same one Element Call itself needs:
+
+1. **LiveKit and the MatrixRTC authorization service.** A LiveKit SFU and
+   [lk-jwt-service](https://github.com/element-hq/lk-jwt-service), set up as
+   in `docs/self_hosting.md` of
+   [Element Call](https://github.com/element-hq/element-call).
+2. **The focus in `.well-known`.** The bridge finds LiveKit only through
+   `https://<server name>/.well-known/matrix/client`, which must list it:
+
+   ```json
+   "org.matrix.msc4143.rtc_foci": [
+     {"type": "livekit", "livekit_service_url": "https://matrix-rtc.example.com/livekit/jwt"}
+   ]
+   ```
+
+   Announcing the transport only through Synapse's `matrix_rtc` setting (the
+   MSC4143 `rtc/transports` endpoint) is not enough for the bridge.
+3. **Room creation for the bridge's users.** `LIVEKIT_FULL_ACCESS_HOMESERVERS`
+   of lk-jwt-service must include the bridge's homeserver (its default `*`
+   does). The bridge's ghosts join the LiveKit room before any Matrix user
+   does, and only full-access users may create it.
+4. **Homeserver settings.** lk-jwt-service checks OpenID tokens, so Synapse
+   needs an `openid` or `federation` listener; the bridge asks for such tokens
+   on behalf of its ghosts. Set `max_event_delay_duration` (MSC4140, e.g.
+   `24h`): without it a crashed bridge leaves its call members visible until
+   their memberships expire after 4 hours. Element Call's guide lists further
+   Synapse settings its clients need (`msc3266_enabled`, `msc4222_enabled`,
+   rate limits).
+5. **Clients.** Element Web with Element Call enabled, or Element X. Calls
+   work in unencrypted rooms only.
+6. **Network.** The bridge host needs outbound UDP to Microsoft's media relays
+   and to the LiveKit server. `calls.stun_server` lets it learn its public
+   address when it sits behind NAT.
+
+`calls.video` (off by default) also carries cameras and screen sharing both
+ways. Video Element Call sends as VP8 or VP9 (its default) is
+re-encoded to H.264 with ffmpeg, which needs the `libx264` encoder and costs
+CPU per stream. LiveKit must allow H.264: list `video/h264` next to
+`video/vp8` in its `room.enabled_codecs`. Teams takes at most 1080p60 both
+ways, so larger video reaches Teams scaled down. Element Call sends cameras
+at up to 720p and screen shares at up to 1080p unless its `media_quality`
+setting raises that. `calls.mirror_camera` sends
+cameras to Teams flipped left to right.
+
+Raised hands and mute go both ways.
+
+`join-meeting <link>` shows any Teams meeting as a call: in the room of its
+chat when the bridge has one, otherwise in a room of its own. `create-meeting
+[subject]` creates a Teams meeting like "Meet now", replies with its join link
+and shows it the same way. With both a work and a personal login, name the
+account first, e.g. `create-meeting personal Planning`.
+
+As organizer or presenter of a bridged meeting, you can ring a Teams user
+into it by inviting their ghost to the room, and let people in from the lobby
+by reacting with 👍 to the notice the bridge posts for each of them.
+
+One-to-one calls are work in progress: a call started in a one-to-one chat
+calls the other side in Teams, and their calls ring in Matrix, to answer by
+joining the call in their chat's room. These calls run directly between the
+two ends, so a bridge behind NAT needs `calls.stun_server`.
+
+`call-test` checks the Teams side of calls by calling the Teams Echo bot.
+
 ## Protocol documentation
 
 `docs/openapi/` holds OpenAPI 3.0 descriptions of both Teams API surfaces:
@@ -183,12 +255,14 @@ Graph v1.0 description, regenerated with
 
 ## Limitations
 
-- **Call media**: call events render as `m.notice` bubbles with a join link
-  that opens in the Teams client. The bridge can place a Teams audio call and
-  carry its media (`call-test` in the management room checks this end to end
-  against the Teams Echo bot), but joining that audio to a Matrix call
-  (Element Call / MatrixRTC) is not implemented yet. Incoming calls, video
-  and meetings are not bridged.
+- **Calls**: one-to-one calls are work in progress, audio only, and ring in
+  Matrix for work accounts only. Meeting video shows at most 9 Teams cameras
+  at a time. Calls in encrypted rooms aren't supported. The chat of a
+  meeting hosted by a personal account or another organisation isn't
+  reachable for a guest, so only its call is bridged.
+- **Out of office and resetting the status** go through Microsoft Graph and
+  need the `MailboxSettings.ReadWrite` and `Presence.ReadWrite` permissions
+  on the Teams sign-in; the bridge says so when Microsoft refuses.
 - **Voice messages on Teams**: Teams's web/desktop client doesn't have a
   voice-recording feature, so audio sent from Matrix renders as a downloadable
   attachment rather than an inline player on the Teams side.
