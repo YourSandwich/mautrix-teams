@@ -93,8 +93,9 @@ func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 429")
 		return nil, ErrRateLimited
 	case resp.StatusCode == http.StatusForbidden:
-		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 403")
-		return nil, ErrForbidden
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		c.log.Debug().Str("method", method).Str("url", url).Bytes("body", data).Msg("Teams API: 403")
+		return nil, fmt.Errorf("%w: %s", ErrForbidden, data)
 	case resp.StatusCode == http.StatusNotFound:
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 404")
 		return nil, ErrNotFound
