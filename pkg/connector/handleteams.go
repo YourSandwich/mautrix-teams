@@ -570,7 +570,7 @@ func (t *TeamsClient) convertIncomingMessage(
 	replyParent := msteams.ExtractReplyParent(content)
 	body := msteams.StripReplyBlockquote(content)
 	body = msteams.StripAMSAttachments(body)
-	plain, html, mentioned := t.renderTeamsHTML(ctx, body, data.Mentions)
+	plain, html, mentioned := t.renderTeamsHTML(ctx, data.ThreadID, body, data.Mentions)
 	if strings.TrimSpace(plain) != "" {
 		plain, html = markImportance(plain, html, data.Properties)
 		content := &event.MessageEventContent{
@@ -615,7 +615,7 @@ func (t *TeamsClient) convertIncomingMessage(
 // Teams uses two mention encodings: legacy <at id="MRI">Name</at> and the
 // newer <span itemtype=".../Mention" itemid="N"> paired with the MRI in
 // properties.mentions (index N).
-func (t *TeamsClient) renderTeamsHTML(ctx context.Context, body string, propsMentions []msteams.Mention) (plain, htmlOut string, mentioned []id.UserID) {
+func (t *TeamsClient) renderTeamsHTML(ctx context.Context, threadID, body string, propsMentions []msteams.Mention) (plain, htmlOut string, mentioned []id.UserID) {
 	if body == "" {
 		return "", "", nil
 	}
@@ -641,6 +641,12 @@ func (t *TeamsClient) renderTeamsHTML(ctx context.Context, body string, propsMen
 		display := html.UnescapeString(name)
 		if display == "" {
 			display = mri
+		}
+		switch user, conversation := mentionTarget(mri, threadID); {
+		case conversation != "":
+			return t.conversationLink(ctx, conversation, display)
+		case user == "":
+			return "<strong>@" + html.EscapeString(strings.TrimPrefix(display, "@")) + "</strong>"
 		}
 		if mxid, ok := resolve(mri); ok {
 			appendMention(mxid)
@@ -680,6 +686,30 @@ func markImportance(plain, htmlBody string, props map[string]any) (string, strin
 		return plain, htmlBody
 	}
 	return label + "\n" + plain, "<p><strong>" + label + "</strong></p>" + htmlBody
+}
+
+// mentionTarget sorts out what a Teams mention names: a user, another channel,
+// team or chat by its thread, or, for tags and the chat's own everyone
+// mention, nothing to link.
+func mentionTarget(mri, threadID string) (user, conversation string) {
+	conversation, _, _ = strings.Cut(mri, ";")
+	switch {
+	case strings.HasPrefix(conversation, "19:") && conversation != threadID:
+		return "", conversation
+	case strings.HasPrefix(mri, "8:") || strings.HasPrefix(mri, "28:"):
+		return mri, ""
+	}
+	return "", ""
+}
+
+// conversationLink links a Teams channel, team or chat to its room, or names it
+// when it isn't bridged.
+func (t *TeamsClient) conversationLink(ctx context.Context, threadID, name string) string {
+	portal, err := t.Main.br.GetExistingPortalByKey(ctx, teamsid.MakePortalKey(threadID, t.UserLogin.ID, t.splitPortals()))
+	if err != nil || portal == nil || portal.MXID == "" {
+		return "#" + html.EscapeString(strings.TrimPrefix(name, "#"))
+	}
+	return fmt.Sprintf(`<a href="%s">%s</a>`, portal.MXID.URI().MatrixToURL(), html.EscapeString(name))
 }
 
 // ensureFileExt appends a mimetype-derived extension; Element falls back to a
