@@ -79,13 +79,10 @@ func TestHTMLToMatrixMention(t *testing.T) {
 }
 
 func TestHTMLToMatrixCodeBlockBrToNewline(t *testing.T) {
-	in := `<pre><code>line1<br>line2<br/>line3</code></pre>`
+	in := `<p>a&nbsp;b</p><pre><code>line1<br>line2<br/>&nbsp;&nbsp;line3</code></pre>`
 	_, htmlOut := HTMLToMatrix(in)
-	if strings.Contains(htmlOut, "<br") {
-		t.Errorf("<br> inside <pre> not flattened: %q", htmlOut)
-	}
-	if !strings.Contains(htmlOut, "line1\nline2\nline3") {
-		t.Errorf("expected literal newlines in <pre>: %q", htmlOut)
+	if htmlOut != "<p>a&nbsp;b</p><pre><code>line1\nline2\n  line3</code></pre>" {
+		t.Errorf("code block not flattened to newlines and spaces: %q", htmlOut)
 	}
 }
 
@@ -161,6 +158,39 @@ func TestExtractFileURIObjectUsesOriginalView(t *testing.T) {
 	withView := strings.Replace(body, `/0-abc" url_thumbnail`, `/0-abc/views/original" url_thumbnail`, 1)
 	if got := ExtractAMSAttachments(withView)[0].URL; strings.Count(got, "/views/") != 1 {
 		t.Errorf("an explicit view must be kept as is, got %q", got)
+	}
+}
+
+// Shaped like what the Teams compose box sends.
+func TestTeamsFormattingToMatrix(t *testing.T) {
+	for in, want := range map[string]string{
+		`<p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_codeBlockEditor-1">&nbsp;</p><pre class="language-go skipProofing language-was-manually-selected" itemid="codeBlockEditor-1"><code>x := 1</code></pre>`: `<pre><code class="language-go">x := 1</code></pre>`,
+		`<pre class="language-was-manually-selected"><code>plain</code></pre>`:                   `<pre><code>plain</code></pre>`,
+		`<span style="background-color:#F4A593;font-size:x-large;">hi</span>`:                    `<span data-mx-bg-color="#F4A593">hi</span>`,
+		`<span style="color:#c4314b;">red</span> <span style="font-size:xx-small;">small</span>`: `<span data-mx-color="#c4314b">red</span> <span>small</span>`,
+		`<s>gone</s> <u>under</u>`: `<s>gone</s> <u>under</u>`,
+	} {
+		if got := TeamsFormattingToMatrix(StripCodeBlockPlaceholders(in)); got != want {
+			t.Errorf("%s\n got %s\nwant %s", in, got, want)
+		}
+	}
+}
+
+func TestMatrixFormattingToTeams(t *testing.T) {
+	for in, want := range map[string]string{
+		`<del>a</del> <strike>b</strike>`:                                                     `<s>a</s> <s>b</s>`,
+		`<span data-mx-bg-color="#fdd472" data-mx-color="#c4314b">x</span>`:                   `<span style="background-color:#fdd472;color:#c4314b;">x</span>`,
+		`<font color="#ff0000">legacy</font>`:                                                 `<span style="color:#ff0000;">legacy</span>`,
+		`<mark>marked</mark>`:                                                                 `<span style="background-color:#fdd472;">marked</span>`,
+		`<h5>five</h5><h6>six</h6>`:                                                           `<h4>five</h4><h4>six</h4>`,
+		`H<sub>2</sub>O <kbd>Ctrl</kbd>`:                                                      `H2O <code>Ctrl</code>`,
+		`<details><summary>More</summary>hidden</details>`:                                    `<strong>More</strong><br>hidden`,
+		`It was <span data-mx-spoiler="plot">him</span>, <span data-mx-spoiler>really</span>`: `It was <i>[spoiler: plot]</i>, <i>[spoiler]</i>`,
+		`<span data-mx-maths="x^2">x²</span>`:                                                 `<span data-mx-maths="x^2">x²</span>`,
+	} {
+		if got := MatrixToTeamsHTML(in); got != want {
+			t.Errorf("%s\n got %s\nwant %s", in, got, want)
+		}
 	}
 }
 

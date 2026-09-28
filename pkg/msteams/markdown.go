@@ -205,14 +205,16 @@ func firstSubmatch(re *regexp.Regexp, s string) string {
 	return m[1]
 }
 
-// MatrixToTeamsHTML strips mx-reply, flattens paragraph breaks into <br>, and
-// rewrites <pre><code> into Teams' CodeBlockEditor shape (otherwise Teams
-// renders a code block as one wrapped line of plain text).
+// MatrixToTeamsHTML strips mx-reply, rewrites formatting Teams renders
+// differently, flattens paragraph breaks into <br>, and rewrites <pre><code>
+// into Teams' CodeBlockEditor shape (otherwise Teams renders a code block as
+// one wrapped line of plain text).
 func MatrixToTeamsHTML(in string) string {
 	if in == "" {
 		return ""
 	}
 	out := mxReplyPattern.ReplaceAllString(in, "")
+	out = matrixFormattingToTeams(out)
 	out = normaliseParagraphs(out)
 	return convertMatrixCodeBlocks(out)
 }
@@ -348,18 +350,22 @@ func rewriteTeamsHTML(in string) string {
 		}
 		return `<strong>` + name + `</strong>`
 	})
-	return FixPreBlockBRs(out)
+	return FixPreBlocks(out)
 }
 
-// FixPreBlockBRs converts <br> to \n inside <pre> blocks. Teams ships code
-// blocks with <br> separators that Element renders as a single wrapped line.
-func FixPreBlockBRs(in string) string {
+// preSpaces are the non-breaking spaces Teams indents code with.
+var preSpaces = strings.NewReplacer("&nbsp;", " ", "&#160;", " ")
+
+// FixPreBlocks turns the <br> and &nbsp; Teams keeps a code block's layout
+// with into the newlines and spaces a <pre> keeps anyway: Element shows <br>
+// separated code as one wrapped line, and copied &nbsp; breaks code.
+func FixPreBlocks(in string) string {
 	if in == "" {
 		return in
 	}
 	return preBlockPattern.ReplaceAllStringFunc(in, func(block string) string {
 		inner := preBlockPattern.FindStringSubmatch(block)[1]
-		fixed := brInsidePattern.ReplaceAllString(inner, "\n")
+		fixed := preSpaces.Replace(brInsidePattern.ReplaceAllString(inner, "\n"))
 		return strings.Replace(block, inner, fixed, 1)
 	})
 }
@@ -368,6 +374,104 @@ func FixPreBlockBRs(in string) string {
 // each code block. Other empty paragraphs are blank lines the sender typed.
 func StripCodeBlockPlaceholders(in string) string {
 	return codeBlockPara.ReplaceAllString(in, "")
+}
+
+var (
+	teamsCodeOpenPattern = regexp.MustCompile(`(?is)<pre\b([^>]*)>\s*<code\b[^>]*>`)
+	classAttrPattern     = regexp.MustCompile(`(?i)\bclass=["']([^"']*)["']`)
+	styledSpanPattern    = regexp.MustCompile(`(?i)<span\b([^>]*?)\s+style=["']([^"']*)["']([^>]*)>`)
+	hexColorPattern      = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+)
+
+// TeamsFormattingToMatrix moves what Teams formats with classes and styles to
+// where Matrix clients look: a code block's language onto its <code>, and
+// highlight and text colours onto data-mx attributes. Font sizes have none.
+func TeamsFormattingToMatrix(in string) string {
+	out := teamsCodeOpenPattern.ReplaceAllStringFunc(in, func(open string) string {
+		class := firstSubmatch(classAttrPattern, teamsCodeOpenPattern.FindStringSubmatch(open)[1])
+		for _, c := range strings.Fields(class) {
+			if strings.HasPrefix(c, "language-") && c != "language-was-manually-selected" {
+				return `<pre><code class="` + c + `">`
+			}
+		}
+		return "<pre><code>"
+	})
+	return styledSpanPattern.ReplaceAllStringFunc(out, func(span string) string {
+		sub := styledSpanPattern.FindStringSubmatch(span)
+		attrs := sub[1] + sub[3]
+		for _, decl := range strings.Split(sub[2], ";") {
+			prop, value, _ := strings.Cut(decl, ":")
+			if value = strings.TrimSpace(value); !hexColorPattern.MatchString(value) {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(prop)) {
+			case "background-color":
+				attrs += ` data-mx-bg-color="` + value + `"`
+			case "color":
+				attrs += ` data-mx-color="` + value + `"`
+			}
+		}
+		return "<span" + attrs + ">"
+	})
+}
+
+var (
+	matrixSpoilerPattern = regexp.MustCompile(`(?is)<span\b[^>]*\bdata-mx-spoiler(?:=["']([^"']*)["'])?[^>]*>.*?</span>`)
+	matrixTagPattern     = regexp.MustCompile(`(?is)<(/?)(del|strike|mark|h5|h6|sub|kbd|details|summary|font|span)\b([^>]*)>`)
+	matrixColorPattern   = regexp.MustCompile(`(?i)\b(data-mx-bg-color|data-mx-color|color)=["'](#[0-9a-fA-F]{6})["']`)
+)
+
+// markHighlight is the Teams compose box's default highlight colour.
+const markHighlight = "#fdd472"
+
+// matrixFormattingToTeams rewrites Matrix formatting into tags the Teams
+// client renders: strikethrough as <s>, colours as a styled span, small
+// headings as h4, details as a bold summary, and spoilers, which Teams can't
+// hide, as a placeholder.
+func matrixFormattingToTeams(in string) string {
+	out := matrixSpoilerPattern.ReplaceAllStringFunc(in, func(spoiler string) string {
+		if reason := matrixSpoilerPattern.FindStringSubmatch(spoiler)[1]; reason != "" {
+			return "<i>[spoiler: " + reason + "]</i>"
+		}
+		return "<i>[spoiler]</i>"
+	})
+	return matrixTagPattern.ReplaceAllStringFunc(out, func(tag string) string {
+		sub := matrixTagPattern.FindStringSubmatch(tag)
+		closing, name := sub[1], strings.ToLower(sub[2])
+		switch {
+		case name == "del" || name == "strike":
+			return "<" + closing + "s>"
+		case name == "h5" || name == "h6":
+			return "<" + closing + "h4>"
+		case name == "kbd":
+			return "<" + closing + "code>"
+		case name == "sub" || name == "details":
+			return ""
+		case name == "summary" && closing != "":
+			return "</strong><br>"
+		case name == "summary":
+			return "<strong>"
+		case closing != "":
+			return "</span>"
+		case name == "mark":
+			return `<span style="background-color:` + markHighlight + `;">`
+		}
+		var style string
+		for _, color := range matrixColorPattern.FindAllStringSubmatch(sub[3], -1) {
+			if strings.EqualFold(color[1], "data-mx-bg-color") {
+				style += "background-color:" + color[2] + ";"
+			} else {
+				style += "color:" + color[2] + ";"
+			}
+		}
+		switch {
+		case style != "":
+			return `<span style="` + style + `">`
+		case name == "font":
+			return "<span>"
+		}
+		return tag
+	})
 }
 
 // ExtractReplyParent returns the Teams message id referenced by a reply
