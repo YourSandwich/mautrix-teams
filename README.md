@@ -63,6 +63,7 @@ features are not bridged yet (see the matrix below).
 | Meeting screen share (opt-in)                 | yes             | yes             |
 | Raised hands and mute in meetings             | yes             | yes             |
 | Upcoming meeting notice (opt-in)              | -               | yes             |
+| Meeting transcripts (after the meeting)       | -               | yes             |
 | Join any meeting by link or code              | yes             | -               |
 | Create a meeting to invite people to          | yes             | -               |
 | Ring a Teams user into a meeting (invite)     | yes             | -               |
@@ -178,6 +179,9 @@ knobs:
   control which Matrix EDUs propagate to Teams
 - `calls.stun_server` - STUN server the bridge uses to learn its public
   address for call media (empty offers only the host's own addresses)
+- `calls.meeting_transcripts` - post the transcript of a meeting Teams
+  transcribed to its room once the meeting ends, quoted and as a WebVTT
+  file, in a thread under the notice of the call's end (on by default)
 
 ## Calls with Element Call
 
@@ -284,6 +288,9 @@ Graph v1.0 description, regenerated with
   direct-chat partners can be mirrored as Matrix presence
   (`presence.sync_teams_presence`, off by default). Group members' presence,
   your own Matrix presence and Teams read state are not bridged.
+- **Meeting transcripts**: the bridge posts a transcript only for meetings it
+  saw start being transcribed, so not for one it was down for at the start.
+  Live captions during the meeting aren't bridged.
 - **Pinned messages**: only messages the bridge has bridged can show as
   pinned in Matrix. Unpinning every message of a chat while the bridge is
   down shows in Matrix after that chat's next pin change.

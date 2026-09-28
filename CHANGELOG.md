@@ -12,11 +12,19 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - A group chat's picture becomes its room's avatar.
 - Reactions with a skin tone bridge both ways, and Teams acknowledgements
   show as ✅.
+- The transcript of a meeting Teams transcribed goes to its room once the
+  meeting ends, quoted and as a WebVTT file, in a thread under the notice
+  of the call's end (`calls.meeting_transcripts`, on by default).
 
 ### Fixed
 
 - Starting a chat with someone you have never chatted with creates the
   Teams chat first, as the web client does.
+- A meeting you started in Teams no longer shows your own account in its
+  Element Call, and Teams' recording and transcription bots no longer show
+  up as call members.
+- Speaking indicators in Element Call light up as soon as someone speaks,
+  and for everyone speaking at once.
 
 ## [31.1] - 2026-09-27
 
