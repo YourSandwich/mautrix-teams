@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -622,5 +623,69 @@ func TestSocketIOAckID(t *testing.T) {
 		if got := socketIOAckID([]byte(frame)); got != want {
 			t.Errorf("socketIOAckID(%q) = %q, want %q", frame, got, want)
 		}
+	}
+}
+
+func TestSendMessageImportance(t *testing.T) {
+	var sent struct {
+		Properties map[string]any `json:"properties"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	if _, err := c.SendMessage(context.Background(), "19:x@thread.v2", "disk full", SendOptions{Importance: "urgent"}); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Properties["importance"] != "urgent" {
+		t.Errorf("properties = %v", sent.Properties)
+	}
+}
+
+// A chat that refuses urgent messages still gets them, marked important; one
+// that refuses both gets them unmarked. Other refusals keep Teams' reason.
+func TestSendMessageImportanceRefused(t *testing.T) {
+	var accept func(importance any) bool
+	var tried []any
+	var first map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		props, _ := sent["properties"].(map[string]any)
+		tried = append(tried, props["importance"])
+		// A retry keeps everything but the importance.
+		delete(props, "importance")
+		if first == nil {
+			first = sent
+		} else if !reflect.DeepEqual(sent, first) {
+			t.Errorf("retry sent %v, first %v", sent, first)
+		}
+		if !accept(tried[len(tried)-1]) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"errorCode":"Forbidden","message":"refused"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	for _, tc := range []struct {
+		accept func(any) bool
+		want   []any
+	}{
+		{func(i any) bool { return i != "urgent" }, []any{"urgent", "high"}},
+		{func(i any) bool { return i == nil }, []any{"urgent", "high", nil}},
+	} {
+		accept, tried, first = tc.accept, nil, nil
+		opts := SendOptions{Importance: "urgent", ContentType: "html", Mentions: []Mention{{UserID: "8:orgid:a"}}}
+		if _, err := c.SendMessage(context.Background(), "19:x@thread.v2", "disk full", opts); err != nil || !slices.Equal(tried, tc.want) {
+			t.Errorf("tried %v, err %v", tried, err)
+		}
+	}
+	accept, first = func(any) bool { return false }, nil
+	if _, err := c.SendMessage(context.Background(), "19:x@thread.v2", "hi", SendOptions{}); !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("err = %v", err)
 	}
 }

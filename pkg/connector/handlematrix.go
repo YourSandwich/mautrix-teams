@@ -96,7 +96,9 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 		opts.Mentions = mentions
 		opts.Files = files
 	default:
-		body, ct, mentions := t.matrixContentToTeams(msg.Content)
+		text := *msg.Content
+		opts.Importance = takeImportance(&text)
+		body, ct, mentions := t.matrixContentToTeams(&text)
 		content = body
 		opts.ContentType = ct
 		opts.Mentions = mentions
@@ -388,6 +390,24 @@ func (t *TeamsClient) matrixHTMLToTeams(in string) (string, []msteams.Mention) {
 		)
 	})
 	return out, mentions
+}
+
+// importancePattern finds a leading !important or !urgent, which marks a
+// message important in Teams as Matrix has no flag for it.
+var importancePattern = regexp.MustCompile(`(?i)^((?:\s*<[^>]+>)*\s*)!(important|urgent)\b(?:\s|<br\s*/?>)*`)
+
+// takeImportance strips the mark from the message and returns Teams' name for it.
+func takeImportance(content *event.MessageEventContent) string {
+	mark := importancePattern.FindStringSubmatch(content.Body)
+	if mark == nil {
+		return ""
+	}
+	content.Body = importancePattern.ReplaceAllString(content.Body, "$1")
+	content.FormattedBody = importancePattern.ReplaceAllString(content.FormattedBody, "$1")
+	if strings.EqualFold(mark[2], "urgent") {
+		return "urgent"
+	}
+	return "high"
 }
 
 // isTeamsChannelThread reports whether a Teams conversation id refers to a

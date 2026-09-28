@@ -572,6 +572,7 @@ func (t *TeamsClient) convertIncomingMessage(
 	body = msteams.StripAMSAttachments(body)
 	plain, html, mentioned := t.renderTeamsHTML(ctx, body, data.Mentions)
 	if strings.TrimSpace(plain) != "" {
+		plain, html = markImportance(plain, html, data.Properties)
 		content := &event.MessageEventContent{
 			MsgType: event.MsgText,
 			Body:    plain,
@@ -666,6 +667,19 @@ func (t *TeamsClient) renderTeamsHTML(ctx context.Context, body string, propsMen
 	htmlOut = msteams.TeamsFormattingToMatrix(htmlOut)
 	plain, _ = msteams.HTMLToMatrix(htmlOut)
 	return
+}
+
+// importanceLabels show a message a Teams user marked important or urgent,
+// which Matrix has no flag for.
+var importanceLabels = map[string]string{"high": "❗ Important", "urgent": "🔔 Urgent"}
+
+func markImportance(plain, htmlBody string, props map[string]any) (string, string) {
+	importance, _ := props["importance"].(string)
+	label := importanceLabels[importance]
+	if label == "" {
+		return plain, htmlBody
+	}
+	return label + "\n" + plain, "<p><strong>" + label + "</strong></p>" + htmlBody
 }
 
 // ensureFileExt appends a mimetype-derived extension; Element falls back to a
