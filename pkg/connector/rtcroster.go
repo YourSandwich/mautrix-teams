@@ -47,16 +47,16 @@ import (
 const maxCallMembers = 24
 
 // Audio levels (RFC 6464, -dBov) sent with the meeting audio, which LiveKit's
-// speaker detection reads: loud on the dominant speaker's tile, silent on the
-// holder's.
+// speaker detection reads: loud on the tiles of whoever is audible, silent on
+// the holder's otherwise.
 const (
 	speakingLevel uint8 = 10
 	silentLevel   uint8 = 127
 )
 
-// speakerTrack is a tile's audio track. The meeting audio moves between
-// tiles, so each keeps its own gapless sequence numbers; only the audio pump
-// writes to it.
+// speakerTrack is a tile's audio track. A tile gets packets only while its
+// speaker is audible, so each keeps its own gapless sequence numbers; only the
+// audio pump writes to it.
 type speakerTrack struct {
 	track *lksdk.LocalTrack
 	seq   uint16
@@ -82,7 +82,7 @@ func publishVoice(room *lksdk.Room) (*speakerTrack, *lksdk.LocalTrackPublication
 
 // callMember is a Teams participant shown as an Element Call member, with a
 // LiveKit participant so that its tile doesn't wait for media, and an audio
-// track that carries the meeting audio while they speak and shows their mute.
+// track that shows them speaking and muted.
 type callMember struct {
 	member   *matrixrtc.Member
 	intent   *appservice.IntentAPI
