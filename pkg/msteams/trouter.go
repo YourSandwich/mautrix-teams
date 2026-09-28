@@ -782,6 +782,11 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 			},
 		}, r.IMDisplayName)
 		return
+	case "RichText/Media_CallTranscript":
+		if callID := transcriptCallID(r.Content); callID != "" {
+			c.emit(Event{Type: EventTypeCallTranscript, ThreadID: threadID, CallID: callID, Timestamp: ParseTeamsTime(r.ComposeTime)}, r.IMDisplayName)
+		}
+		return
 	case "Text", "RichText", "RichText/Html", "RichText/Media_GenericFile",
 		"RichText/Media_Card", "RichText/Media_FlikMsg":
 	default:

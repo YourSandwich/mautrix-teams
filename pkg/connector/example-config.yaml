@@ -60,6 +60,9 @@ calls:
     # Pin the next occurrence of each meeting from your Teams calendar in its
     # meeting chat's room, and keep it current.
     upcoming_meetings: false
+    # Post the transcript of a meeting Teams transcribed to its room once the
+    # meeting ends, in a thread under the notice that the call ended.
+    meeting_transcripts: true
     # Show Teams meetings that are running as Element Calls in their rooms.
     # Needs MatrixRTC (a LiveKit focus in the homeserver's .well-known).
     element_call: false

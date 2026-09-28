@@ -168,6 +168,8 @@ const (
 	EventTypeReadReceipt   EventType = "readReceipt"
 	EventTypeChatUpdate    EventType = "chatUpdate"
 	EventTypeCall          EventType = "call"
+	// A transcript is being made of the call CallID in the thread.
+	EventTypeCallTranscript EventType = "callTranscript"
 )
 
 type Event struct {
@@ -179,6 +181,7 @@ type Event struct {
 	TypingStop bool
 	ChatUpdate *ChatUpdate
 	Presence   *Presence
+	CallID     string
 }
 
 type ChatUpdate struct {

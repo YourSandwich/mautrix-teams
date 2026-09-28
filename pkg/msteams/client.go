@@ -97,20 +97,22 @@ type Client struct {
 	delveBase            string
 	calling              callingEndpoints
 	presenceBase         string
+	meetingContentBase   string
 	mySiteURL            string
 	skypeID              string
 
-	tokenLock      sync.RWMutex
-	skype          *Token
-	auth           *Token
-	csaAuth        *Token
-	searchAuth     *Token
-	delveAuth      *Token
-	graphAuth      *Token
-	ic3Auth        *Token
-	presenceAuth   *Token
-	sharePointAuth map[string]*Token
-	refresh        string
+	tokenLock          sync.RWMutex
+	skype              *Token
+	auth               *Token
+	csaAuth            *Token
+	searchAuth         *Token
+	delveAuth          *Token
+	graphAuth          *Token
+	ic3Auth            *Token
+	presenceAuth       *Token
+	meetingContentAuth *Token
+	sharePointAuth     map[string]*Token
+	refresh            string
 
 	connected atomic.Bool
 	closed    atomic.Bool

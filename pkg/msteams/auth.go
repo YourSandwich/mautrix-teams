@@ -66,6 +66,9 @@ const (
 	ic3OAuthScope = "https://ic3.teams.office.com/.default offline_access"
 
 	presenceOAuthScope = "https://presence.teams.microsoft.com/.default offline_access"
+	// meetingContentOAuthScope authorises the meeting content service that
+	// lists a meeting's recap (the web client's cmdMeetingArtifactsServiceResource).
+	meetingContentOAuthScope = "6bc3b958-689b-49f5-9006-36d165f30e00/.default offline_access"
 
 	workAuthzURL     = "https://teams.microsoft.com/api/authsvc/v1.0/authz"
 	personalAuthzURL = "https://teams.live.com/api/auth/v1.0/authz/consumer"
@@ -322,6 +325,18 @@ func (c *Client) RefreshPresenceToken(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) RefreshMeetingContentToken(ctx context.Context) error {
+	if IsConsumerTenant(c.cfg.TenantID) {
+		return ErrNotImplemented
+	}
+	out, err := c.refreshOAuthToken(ctx, meetingContentOAuthScope, "")
+	if err != nil {
+		return err
+	}
+	c.storeOAuthToken(&c.meetingContentAuth, out)
+	return nil
+}
+
 func (c *Client) RefreshGraphToken(ctx context.Context) error {
 	if IsConsumerTenant(c.cfg.TenantID) {
 		return ErrNotImplemented
@@ -485,6 +500,7 @@ func (c *Client) applyAuthzEndpoints(resp authzResponse) {
 	// (nam/eur/apc); pick the right prefix from the user's data residency.
 	c.delveBase = "https://" + lokiPrefixFor(resp) + ".loki.delve.office.com"
 	c.presenceBase = resp.RegionGtms["unifiedPresence"]
+	c.meetingContentBase = resp.RegionGtms["mcpService"]
 	c.calling = callingEndpoints{
 		conversationURL: resp.RegionGtms["calling_conversationServiceUrl"],
 		region:          resp.Region,

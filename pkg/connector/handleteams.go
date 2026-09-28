@@ -65,6 +65,15 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 		}
 		t.queueMessageEvent(ctx, ev, false)
 		go t.refreshLiveMeeting(ctx, ev.Message.ThreadID)
+		if callID := msteams.EndedCallID(ev.Message.Content); callID != "" {
+			if _, ok := t.transcribed.LoadAndDelete(callID); ok {
+				go t.postTranscript(ctx, ev.ThreadID, callID, ev.Message.ID)
+			}
+		}
+	case msteams.EventTypeCallTranscript:
+		if t.Main.Config.Calls.PostTranscripts() {
+			t.transcribed.Store(ev.CallID, struct{}{})
+		}
 	case msteams.EventTypeChatUpdate:
 		t.queueChatUpdate(ev)
 	case msteams.EventTypePresence:

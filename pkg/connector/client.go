@@ -53,6 +53,9 @@ type TeamsClient struct {
 
 	liveCallsLock sync.Mutex
 	liveCalls     map[id.RoomID]*liveCall
+	// The IDs of calls Teams is transcribing, whose transcripts go to their
+	// rooms once they end.
+	transcribed sync.Map
 }
 
 var (
