@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [31.3] - 2026-09-28
+
 ### Added
 
 - `matrix_to_teams` and `teams_to_matrix` switch invites, kicks, renames and
