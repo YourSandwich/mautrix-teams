@@ -25,6 +25,7 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/appservice"
@@ -45,9 +46,8 @@ type bridgedCall struct {
 	call   *msteams.Call
 	// Teams moves the media to a new leg when it renegotiates.
 	leg atomic.Pointer[teamsmedia.AudioLeg]
-	// Teams mixes the meeting audio into one stream; it goes to the tile of
-	// whoever Teams names as the dominant speaker, keyed by their audio
-	// source, and to the holder's tile otherwise.
+	// Teams mixes the meeting audio into one stream, which plays on the
+	// holder's tile; speakers maps audio sources to the tiles they light up.
 	holderVoice *speakerTrack
 	publisher   *lksdk.Room
 	speakers    atomic.Pointer[map[uint32]*speakerTrack]
@@ -496,8 +496,15 @@ func pumpToTeams(track *webrtc.TrackRemote, bc *bridgedCall) {
 	}
 }
 
+// opusSilence is a 20 ms Opus frame of silence.
+var opusSilence = []byte{0xf8, 0xff, 0xfe}
+
 // A track being replaced drops what is written to it.
 func pumpToLiveKit(bc *bridgedCall) {
+	// Each packet names who is audible in it as its contributing sources, which
+	// the web client reads too. The dominant speaker Teams reports lags and
+	// names one, so it only stands in until a packet names anyone.
+	named := false
 	for {
 		leg := bc.leg.Load()
 		pkt, err := leg.ReadPacket()
@@ -507,13 +514,26 @@ func pumpToLiveKit(bc *bridgedCall) {
 			}
 			continue
 		}
-		target, level := bc.holderVoice, silentLevel
+		audible := pkt.CSRC
+		named = named || len(audible) > 0
+		if !named {
+			audible = []uint32{leg.DominantSpeaker()}
+		}
+		level := silentLevel
 		if speakers := bc.speakers.Load(); speakers != nil {
-			if voice := (*speakers)[leg.DominantSpeaker()]; voice != nil {
-				target, level = voice, speakingLevel
+			for _, source := range audible {
+				switch voice := (*speakers)[source]; voice {
+				case nil:
+				case bc.holderVoice:
+					level = speakingLevel
+				default:
+					// LiveKit tells speakers by the level alone, so silence lights up
+					// their tiles while the mix plays on one track without hopping.
+					voice.write(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pkt.PayloadType, Timestamp: pkt.Timestamp}, Payload: opusSilence}, speakingLevel)
+				}
 			}
 		}
-		target.write(pkt, level)
+		bc.holderVoice.write(pkt, level)
 	}
 }
 
