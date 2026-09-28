@@ -53,8 +53,9 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - `status`, `status-message` and `out-of-office` set your Teams status, the
   note shown with it, and your Outlook automatic replies. The bridge never
   changes them on its own.
-- A login flow for personal Microsoft accounts (Teams free), next to work
-  and school accounts; commands take `work` or `personal` to pick a login.
+- Experimental: a login flow for personal Microsoft accounts (Teams free),
+  next to work and school accounts; commands take `work` or `personal` to
+  pick a login.
 - `create-meeting` creates a Teams meeting like "Meet now" and shows it as a
   call.
 - In bridged meetings: raised hands and mute go both ways, the lobby shows as
@@ -63,9 +64,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - `calls.video`: cameras and screen sharing both ways in meetings and group
   calls, re-encoded to H.264 with ffmpeg where Element Call sends VP8 or VP9;
   `calls.mirror_camera` flips cameras sent to Teams.
-- Work in progress: one-to-one calls with Element Call both ways, a call
-  started in a one-to-one chat ringing the other side in Teams and a
-  colleague's call ringing in Matrix.
+- Work in progress: one-to-one voice calls with Element Call both ways, a
+  call started in a one-to-one chat ringing the other side in Teams and a
+  colleague's call ringing in Matrix. Video in one-to-one calls is not
+  bridged yet.
 
 ### Fixed
 
