@@ -90,7 +90,11 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 		if err != nil {
 			return nil, failedSend(err)
 		}
-		caption, mentions := t.captionToTeams(msg.Content)
+		captioned := *msg.Content
+		if captioned.GetCaption() != "" {
+			opts.Importance = takeImportance(&captioned)
+		}
+		caption, mentions := t.captionToTeams(&captioned)
 		content = media + caption
 		opts.ContentType = "html"
 		opts.Mentions = mentions
@@ -223,12 +227,13 @@ func (t *TeamsClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.Matrix
 	if !ok {
 		return errors.New("invalid message id")
 	}
-	newContent := msg.Content
-	if msg.Content != nil && msg.Content.NewContent != nil {
-		newContent = msg.Content.NewContent
+	newContent := *msg.Content
+	if msg.Content.NewContent != nil {
+		newContent = *msg.Content.NewContent
 	}
-	content, contentType, mentions := t.matrixContentToTeams(newContent)
-	return failedSend(t.Client.EditMessage(ctx, threadID, messageID, content, msteams.SendOptions{ContentType: contentType, Mentions: mentions}))
+	importance := takeImportance(&newContent)
+	content, contentType, mentions := t.matrixContentToTeams(&newContent)
+	return failedSend(t.Client.EditMessage(ctx, threadID, messageID, content, msteams.SendOptions{ContentType: contentType, Mentions: mentions, Importance: importance}))
 }
 
 func (t *TeamsClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {

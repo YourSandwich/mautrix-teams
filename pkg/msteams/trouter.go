@@ -840,6 +840,7 @@ func (c *Client) handleEventMessage(resourceType string, raw json.RawMessage) {
 			Mentions:    parsePropertiesMentions(r.Properties),
 			SharedFiles: parsePropertiesFiles(r.Properties),
 			ParentID:    parentID,
+			Properties:  r.Properties,
 		},
 	}, r.IMDisplayName)
 }

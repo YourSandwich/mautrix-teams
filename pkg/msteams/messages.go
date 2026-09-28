@@ -95,16 +95,7 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 	}
 	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(convID) + "/messages"
 	var resp sendMessageResponse
-	err := c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp)
-	// Teams refuses a mark the chat or tenant doesn't allow; the message still
-	// goes out with the next lower one.
-	for errors.Is(err, ErrForbidden) && opts.Importance != "" {
-		c.log.Info().Err(err).Str("importance", opts.Importance).Msg("Teams refused the message's importance, sending it with less")
-		opts.Importance = lowerImportance[opts.Importance]
-		body.Properties = buildProperties(opts)
-		err = c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp)
-	}
-	if err != nil {
+	if err := c.sendMarked(ctx, "POST", endpoint, &body, opts, &resp); err != nil {
 		return "", err
 	}
 	c.MarkSent(opts.ClientMessageID)
@@ -115,6 +106,19 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 }
 
 var lowerImportance = map[string]string{"urgent": "high", "high": ""}
+
+// sendMarked sends a message or edit. Teams refuses a mark the chat or tenant
+// doesn't allow, so a refused one goes out again with the next lower mark.
+func (c *Client) sendMarked(ctx context.Context, method, endpoint string, body *sendMessageRequest, opts SendOptions, out any) error {
+	err := c.doJSON(ctx, method, endpoint, AuthSkype, body, out)
+	for errors.Is(err, ErrForbidden) && opts.Importance != "" {
+		c.log.Info().Err(err).Str("importance", opts.Importance).Msg("Teams refused the message's importance, sending it with less")
+		opts.Importance = lowerImportance[opts.Importance]
+		body.Properties = buildProperties(opts)
+		err = c.doJSON(ctx, method, endpoint, AuthSkype, body, out)
+	}
+	return err
+}
 
 // buildProperties emits mentions and files as JSON strings inside the outer
 // JSON, as the web client does. A mention's itemid indexes into the inline
@@ -179,7 +183,7 @@ func (c *Client) EditMessage(ctx context.Context, threadID, messageID, newConten
 	}
 	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(threadID) +
 		"/messages/" + url.PathEscape(messageID)
-	if err := c.doJSON(ctx, "PUT", endpoint, AuthSkype, body, nil); err != nil {
+	if err := c.sendMarked(ctx, "PUT", endpoint, &body, opts, nil); err != nil {
 		return err
 	}
 	// Claim the edit's clientmessageid so its Trouter echo (which now routes as
