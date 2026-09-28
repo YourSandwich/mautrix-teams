@@ -112,3 +112,28 @@ func TestTeamsArrivalTime(t *testing.T) {
 		t.Errorf("fallback should be the current time, got %v", got)
 	}
 }
+
+func TestTakeImportance(t *testing.T) {
+	for _, tc := range []struct{ body, formatted, want, wantBody, wantFormatted string }{
+		{"!urgent test", "", "urgent", "test", ""},
+		{"!urgent Disk full", "", "urgent", "Disk full", ""},
+		{"!Important\nDeploy at 5", "<p>!Important<br>Deploy at 5</p>", "high", "Deploy at 5", "<p>Deploy at 5</p>"},
+		{"!importantly not", "", "", "!importantly not", ""},
+		{"say !important later", "", "", "say !important later", ""},
+	} {
+		content := event.MessageEventContent{Body: tc.body, FormattedBody: tc.formatted}
+		if got := takeImportance(&content); got != tc.want || content.Body != tc.wantBody || content.FormattedBody != tc.wantFormatted {
+			t.Errorf("%q: %q, body %q, formatted %q", tc.body, got, content.Body, content.FormattedBody)
+		}
+	}
+}
+
+func TestMarkImportance(t *testing.T) {
+	plain, formatted := markImportance("hi", "<p>hi</p>", map[string]any{"importance": "high"})
+	if plain != "❗ Important\nhi" || formatted != "<p><strong>❗ Important</strong></p><p>hi</p>" {
+		t.Errorf("marked %q, %q", plain, formatted)
+	}
+	if plain, _ := markImportance("hi", "hi", map[string]any{"importance": "normal"}); plain != "hi" {
+		t.Errorf("normal message marked: %q", plain)
+	}
+}

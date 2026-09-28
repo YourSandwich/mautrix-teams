@@ -39,6 +39,8 @@ type SendOptions struct {
 	ClientMessageID string
 	DisplayName     string
 	Files           []ChatFile
+	// Importance is "high" or "urgent" for a message marked important.
+	Importance string
 }
 
 // sendMessageRequest mirrors the Teams web client's POST body. Any field not
@@ -93,7 +95,16 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 	}
 	endpoint := c.chatSvcBaseURL() + "/v1/users/ME/conversations/" + url.PathEscape(convID) + "/messages"
 	var resp sendMessageResponse
-	if err := c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp); err != nil {
+	err := c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp)
+	// Teams refuses a mark the chat or tenant doesn't allow; the message still
+	// goes out with the next lower one.
+	for errors.Is(err, ErrForbidden) && opts.Importance != "" {
+		c.log.Info().Err(err).Str("importance", opts.Importance).Msg("Teams refused the message's importance, sending it with less")
+		opts.Importance = lowerImportance[opts.Importance]
+		body.Properties = buildProperties(opts)
+		err = c.doJSON(ctx, "POST", endpoint, AuthSkype, body, &resp)
+	}
+	if err != nil {
 		return "", err
 	}
 	c.MarkSent(opts.ClientMessageID)
@@ -102,6 +113,8 @@ func (c *Client) SendMessage(ctx context.Context, threadID, content string, opts
 	}
 	return opts.ClientMessageID, nil
 }
+
+var lowerImportance = map[string]string{"urgent": "high", "high": ""}
 
 // buildProperties emits mentions and files as JSON strings inside the outer
 // JSON, as the web client does. A mention's itemid indexes into the inline
@@ -113,6 +126,9 @@ func buildProperties(opts SendOptions) any {
 	}
 	if len(opts.Files) > 0 {
 		props["files"] = fileCardsJSON(opts.Files)
+	}
+	if opts.Importance != "" {
+		props["importance"] = opts.Importance
 	}
 	if len(props) == 0 {
 		return nil
