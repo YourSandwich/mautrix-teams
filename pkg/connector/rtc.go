@@ -185,7 +185,8 @@ func (t *TeamsClient) liveMeetingRoom(code string) id.RoomID {
 }
 
 // showLiveMeeting makes the ghost of whoever started the meeting a call member
-// and announces the call, which gives the room its Join button.
+// and announces the call, which gives the room its Join button. The bot holds a
+// meeting the user started, whose own ghost would show them twice.
 func (t *TeamsClient) showLiveMeeting(ctx context.Context, portal *bridgev2.Portal, live *msteams.LiveMeeting) (*liveCall, error) {
 	transport, err := t.Main.rtcTransport(ctx)
 	if err != nil {
@@ -194,8 +195,15 @@ func (t *TeamsClient) showLiveMeeting(ctx context.Context, portal *bridgev2.Port
 	if err := t.allowCallMembers(ctx, portal.MXID); err != nil {
 		return nil, fmt.Errorf("allow call members: %w", err)
 	}
-	intent, err := t.callGhost(ctx, portal.MXID, live.Initiator)
-	if err != nil {
+	holder := live.Initiator
+	var intent *appservice.IntentAPI
+	if holder == t.UserMRI {
+		bot, ok := t.Main.br.Bot.(*matrix.ASIntent)
+		if !ok {
+			return nil, errors.New("bridge bot has no appservice intent")
+		}
+		intent, holder = bot.Matrix, ""
+	} else if intent, err = t.callGhost(ctx, portal.MXID, holder); err != nil {
 		return nil, err
 	}
 	member, err := matrixrtc.Join(ctx, intent, portal.MXID, intent.UserID, ghostCallDevice, transport)
@@ -206,7 +214,7 @@ func (t *TeamsClient) showLiveMeeting(ctx context.Context, portal *bridgev2.Port
 	if _, err := intent.SendMessageEvent(ctx, portal.MXID, matrixrtc.NotificationEvent, notice); err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to announce the call")
 	}
-	return &liveCall{member: member, meeting: live, threadID: teamsid.ParsePortalID(portal.ID), ghost: intent, holder: live.Initiator}, nil
+	return &liveCall{member: member, meeting: live, threadID: teamsid.ParsePortalID(portal.ID), ghost: intent, holder: holder}, nil
 }
 
 // startCallFromMatrix prepares the Teams call of a room whose call a Matrix
