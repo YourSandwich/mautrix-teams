@@ -137,3 +137,13 @@ func TestMarkImportance(t *testing.T) {
 		t.Errorf("normal message marked: %q", plain)
 	}
 }
+
+func TestFailedSendShowsNotice(t *testing.T) {
+	var status bridgev2.MessageStatus
+	if err := failedSend(msteams.ErrForbidden); !errors.As(err, &status) || !status.SendNotice || !errors.Is(err, msteams.ErrForbidden) {
+		t.Errorf("failedSend = %#v", err)
+	}
+	if failedSend(nil) != nil {
+		t.Error("success became a failure")
+	}
+}
