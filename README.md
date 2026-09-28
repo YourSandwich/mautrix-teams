@@ -17,6 +17,12 @@ camera video and screen sharing, and meetings can be created from Matrix.
 One-to-one calls are work in progress, and a couple of niche Teams-only
 features are not bridged yet (see the matrix below).
 
+![A Teams meeting in Element Call next to the Teams web client](docs/images/video-call.png)
+
+A Teams meeting in Element Call (left) and in the Teams web client (right):
+the screen shared from Element Call shows in Teams, and the Teams
+participant's camera shows in Element Call.
+
 ## Features
 
 | Feature                                       | Matrix -> Teams | Teams -> Matrix |
@@ -69,7 +75,7 @@ features are not bridged yet (see the matrix below).
 | Join any meeting by link or code              | yes             | -               |
 | Create a meeting to invite people to          | yes             | -               |
 | Ring a Teams user into a meeting (invite)     | yes             | -               |
-| Admit from a meeting's lobby (reaction)       | yes             | -               |
+| Admit or deny in a meeting's lobby (reaction) | yes             | -               |
 | One-to-one calls (Element Call)               | in progress     | in progress     |
 | Own status, status note, out of office        | yes             | -               |
 | Teams audio call self-test (`call-test`)      | yes             | -               |
@@ -81,6 +87,10 @@ marked that way; the mark is left out of the message. Teams refuses urgent
 messages in chats with external users or more than 20 members, so there
 they go out marked important. Messages marked in Teams arrive with a
 "❗ Important" or "🔔 Urgent" line on top.
+
+Invites, kicks, renames and pins can each be switched off per direction
+under `matrix_to_teams` and `teams_to_matrix` in the config, and group
+pictures from Teams under `teams_to_matrix`. All of them are on by default.
 
 ### Teams structure mapping
 
@@ -248,8 +258,9 @@ and shows it the same way. With both a work and a personal login, name the
 account first, e.g. `create-meeting personal Planning`.
 
 As organizer or presenter of a bridged meeting, you can ring a Teams user
-into it by inviting their ghost to the room, and let people in from the lobby
-by reacting with 👍 to the notice the bridge posts for each of them.
+into it by inviting their ghost to the room. For each person waiting in the
+lobby the bridge posts a notice with 👍 and 👎 on it: click 👍 to let them in,
+👎 to turn them away.
 
 One-to-one calls are work in progress: a call started in a one-to-one chat
 calls the other side in Teams, and their calls ring in Matrix, to answer by
