@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -687,5 +688,51 @@ func TestSendMessageImportanceRefused(t *testing.T) {
 	accept, first = func(any) bool { return false }, nil
 	if _, err := c.SendMessage(context.Background(), "19:x@thread.v2", "hi", SendOptions{}); !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "refused") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// A message marked important keeps its properties on the way in, as the
+// bridge labels it from them.
+func TestTrouterMessageKeepsImportance(t *testing.T) {
+	raw, _ := json.Marshal(trouterMessageResource{
+		ID:               "1790000000000",
+		From:             "https://example/v1/users/ME/contacts/8:orgid:a",
+		ConversationLink: "https://example/v1/users/ME/conversations/19:x@thread.v2",
+		MessageType:      "RichText/Html",
+		Content:          "<p>disk full</p>",
+		Properties:       map[string]any{"importance": "high"},
+	})
+	c := &Client{events: make(chan Event, 1), log: zerolog.Nop()}
+	c.handleEventMessage("NewMessage", raw)
+	select {
+	case ev := <-c.events:
+		if ev.Message == nil || ev.Message.Properties["importance"] != "high" {
+			t.Errorf("event = %+v", ev)
+		}
+	default:
+		t.Error("no message event")
+	}
+}
+
+// An edit can mark a message too, with the same fallback when Teams refuses.
+func TestEditMessageImportance(t *testing.T) {
+	var tried []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			Properties map[string]any `json:"properties"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		tried = append(tried, r.Method+" "+fmt.Sprint(sent.Properties["importance"]))
+		if sent.Properties["importance"] == "urgent" {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := newClientAt(t, srv.URL)
+	if err := c.EditMessage(context.Background(), "19:x@thread.v2", "1790000000000", "server down", SendOptions{Importance: "urgent"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(tried, []any{"PUT urgent", "PUT high"}) {
+		t.Errorf("tried %v", tried)
 	}
 }
