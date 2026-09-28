@@ -147,3 +147,12 @@ func TestFailedSendShowsNotice(t *testing.T) {
 		t.Error("success became a failure")
 	}
 }
+
+// A link to a Matrix room goes to Teams as a link, never as a mention.
+func TestRoomLinksStayLinks(t *testing.T) {
+	in := `see <a href="https://matrix.to/#/!abc:example.org">Standup</a> and <a href="https://matrix.to/#/#team:example.org">#team</a>`
+	out, mentions := (&TeamsClient{}).matrixHTMLToTeams(in)
+	if out != in || len(mentions) != 0 {
+		t.Errorf("out %s, mentions %v", out, mentions)
+	}
+}
