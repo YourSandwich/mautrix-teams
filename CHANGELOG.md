@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [31.2] - 2026-09-28
+
 ### Added
 
 - Pinned messages bridge both ways between Teams and the room's pins.
