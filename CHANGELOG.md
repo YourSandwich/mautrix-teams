@@ -12,6 +12,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - A group chat's picture becomes its room's avatar.
 - Reactions with a skin tone bridge both ways, and Teams acknowledgements
   show as ✅.
+- Text colour, highlight and strikethrough carry over both ways, and code
+  blocks from Teams keep their language.
+- Messages marked important or urgent in Teams say so in Matrix, and a
+  Matrix message starting with `!important` or `!urgent` is sent marked.
 - The transcript of a meeting Teams transcribed goes to its room once the
   meeting ends, quoted and as a WebVTT file, in a thread under the notice
   of the call's end (`calls.meeting_transcripts`, on by default).
@@ -25,6 +29,11 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   up as call members.
 - Speaking indicators in Element Call light up as soon as someone speaks,
   and for everyone speaking at once.
+- Blank lines in messages from Teams are kept.
+- A message Teams refuses now gets a notice in its room with Teams' reason,
+  instead of failing silently.
+- A mention of a Teams channel links to the channel's room instead of a user
+  that doesn't exist, and tag mentions show as text.
 
 ## [31.1] - 2026-09-27
 
