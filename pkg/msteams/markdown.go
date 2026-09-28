@@ -81,7 +81,7 @@ var (
 	brInsidePattern = regexp.MustCompile(`(?i)<br\s*/?>`)
 	mxReplyPattern  = regexp.MustCompile(`(?s)<mx-reply>.*?</mx-reply>`)
 	whitespacePat   = regexp.MustCompile(`[ \t]+`)
-	emptySkypePara  = regexp.MustCompile(`(?is)<p\b[^>]*itemtype=["']http://schema\.skype\.com/CodeBlockEditor["'][^>]*>\s*(?:&nbsp;|&#160;|\s)*</p>|<p>\s*(?:&nbsp;|&#160;|\s)*</p>`)
+	codeBlockPara   = regexp.MustCompile(`(?is)<p\b[^>]*itemtype=["']http://schema\.skype\.com/CodeBlockEditor["'][^>]*>\s*(?:&nbsp;|&#160;|\s)*</p>`)
 )
 
 // ExtractAMSAttachments is regex-based because the Teams chat service
@@ -364,13 +364,10 @@ func FixPreBlockBRs(in string) string {
 	})
 }
 
-// StripEmptyParagraphs removes Teams' CodeBlockEditor placeholder paragraphs
-// and bare <p></p> / <p>&nbsp;</p> noise around block elements.
-func StripEmptyParagraphs(in string) string {
-	if in == "" {
-		return in
-	}
-	return emptySkypePara.ReplaceAllString(in, "")
+// StripCodeBlockPlaceholders removes the empty paragraph Teams puts before
+// each code block. Other empty paragraphs are blank lines the sender typed.
+func StripCodeBlockPlaceholders(in string) string {
+	return codeBlockPara.ReplaceAllString(in, "")
 }
 
 // ExtractReplyParent returns the Teams message id referenced by a reply

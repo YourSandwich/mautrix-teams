@@ -163,3 +163,16 @@ func TestExtractFileURIObjectUsesOriginalView(t *testing.T) {
 		t.Errorf("an explicit view must be kept as is, got %q", got)
 	}
 }
+
+// A blank line typed in Teams is an empty paragraph; only the one before a
+// code block is Teams' own.
+func TestStripCodeBlockPlaceholders(t *testing.T) {
+	in := `<p>a</p><p>&nbsp;</p><p>b</p><p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_codeBlockEditor-1">&nbsp;</p><pre><code>c</code></pre>`
+	out := StripCodeBlockPlaceholders(in)
+	if out != `<p>a</p><p>&nbsp;</p><p>b</p><pre><code>c</code></pre>` {
+		t.Errorf("stripped to %s", out)
+	}
+	if plain, _ := HTMLToMatrix(out); plain != "a\n\nb\nc" {
+		t.Errorf("plain = %q", plain)
+	}
+}

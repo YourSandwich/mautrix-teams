@@ -661,7 +661,7 @@ func (t *TeamsClient) renderTeamsHTML(ctx context.Context, body string, propsMen
 		}
 		return renderMention(propsMentions[idx].UserID, name)
 	})
-	htmlOut = msteams.StripEmptyParagraphs(htmlOut)
+	htmlOut = msteams.StripCodeBlockPlaceholders(htmlOut)
 	htmlOut = msteams.FixPreBlockBRs(htmlOut)
 	plain, _ = msteams.HTMLToMatrix(htmlOut)
 	return
