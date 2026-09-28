@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/livekit/protocol/livekit"
@@ -196,7 +197,8 @@ func (t *TeamsClient) followRoster(bc *bridgedCall, call *msteams.Call, live *li
 func (t *TeamsClient) syncCallMembers(bc *bridgedCall, roster []msteams.Participant, holder string, members map[string]*callMember) {
 	present := make(map[string]bool, len(roster))
 	for _, p := range roster {
-		if p.MRI == t.UserMRI || p.MRI == holder {
+		// Teams' recorder and transcript service join meetings as 28: bots.
+		if p.MRI == t.UserMRI || p.MRI == holder || strings.HasPrefix(p.MRI, "28:") {
 			continue
 		}
 		present[p.MRI] = true
