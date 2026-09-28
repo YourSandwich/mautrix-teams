@@ -23,6 +23,8 @@ features are not bridged yet (see the matrix below).
 | --------------------------------------------- |:---------------:|:---------------:|
 | Plain text messages                           | yes             | yes             |
 | Formatted messages (bold/italic/etc)          | yes             | yes             |
+| Text colour, highlight, strikethrough         | yes             | yes             |
+| Important and urgent messages                 | yes             | yes             |
 | Mentions                                      | yes             | yes             |
 | Replies                                       | yes             | yes             |
 | Threads (channel)                             | yes             | yes             |
@@ -73,6 +75,12 @@ features are not bridged yet (see the matrix below).
 | Teams audio call self-test (`call-test`)      | yes             | -               |
 | End-to-bridge encryption                      | yes             | yes             |
 | End-to-end encryption (Teams side)            | -               | -               |
+
+Start a Matrix message with `!important` or `!urgent` to send it to Teams
+marked that way; the mark is left out of the message. Teams refuses urgent
+messages in chats with external users or more than 20 members, so there
+they go out marked important. Messages marked in Teams arrive with a
+"❗ Important" or "🔔 Urgent" line on top.
 
 ### Teams structure mapping
 
@@ -291,6 +299,8 @@ Graph v1.0 description, regenerated with
 - **Meeting transcripts**: the bridge posts a transcript only for meetings it
   saw start being transcribed, so not for one it was down for at the start.
   Live captions during the meeting aren't bridged.
+- **Formatting**: Teams font sizes don't carry over to Matrix. Matrix
+  spoilers arrive in Teams as `[spoiler]`, since Teams can't hide text.
 - **Pinned messages**: only messages the bridge has bridged can show as
   pinned in Matrix. Unpinning every message of a chat while the bridge is
   down shows in Matrix after that chat's next pin change.
