@@ -243,12 +243,18 @@ func (t *TeamsClient) showLobby(bc *bridgedCall, waiting []msteams.Participant, 
 		if lobby[p.MRI] != "" {
 			continue
 		}
-		text := fmt.Sprintf("%s is waiting in the lobby. React with %s to let them in.", cmp.Or(p.DisplayName, "Someone"), admitKey)
+		text := fmt.Sprintf("%s is waiting in the lobby. React with %s to let them in or %s to turn them away.", cmp.Or(p.DisplayName, "Someone"), admitKey, denyKey)
 		content := &event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgNotice, Body: text}}
 		resp, err := t.Main.br.Bot.SendMessage(ctx, bc.roomID, event.EventMessage, content, nil)
 		if err != nil {
 			zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to show who waits in the lobby")
 			continue
+		}
+		for _, key := range []string{admitKey, denyKey} {
+			reaction := &event.Content{Parsed: &event.ReactionEventContent{RelatesTo: event.RelatesTo{Type: event.RelAnnotation, EventID: resp.EventID, Key: key}}}
+			if _, err := t.Main.br.Bot.SendMessage(ctx, bc.roomID, event.EventReaction, reaction, nil); err != nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to put a reaction to click on a lobby notice")
+			}
 		}
 		lobby[p.MRI] = resp.EventID
 		t.liveCallsLock.Lock()

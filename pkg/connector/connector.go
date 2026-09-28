@@ -169,7 +169,9 @@ func (tc *TeamsConnector) Start(ctx context.Context) error {
 	// personal-space / management-room creation.
 	tc.uploadNetworkIcon(ctx)
 	if mc, ok := tc.br.Matrix.(*matrix.Connector); ok {
-		mc.EventProcessor.On(event.StatePinnedEvents, tc.handleMatrixPins)
+		if tc.Config.MatrixToTeams.Pins() {
+			mc.EventProcessor.On(event.StatePinnedEvents, tc.handleMatrixPins)
+		}
 		if tc.Config.Calls.ElementCall {
 			mc.EventProcessor.On(matrixrtc.MemberEvent, tc.handleCallMember)
 			mc.EventProcessor.On(event.EventReaction, tc.handleCallReaction)

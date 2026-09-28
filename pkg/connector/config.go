@@ -23,6 +23,7 @@ import (
 
 	up "go.mau.fi/util/configupgrade"
 	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 )
@@ -62,8 +63,13 @@ type Config struct {
 
 	Calls CallsConfig `yaml:"calls"`
 
+	MatrixToTeams RoomChanges `yaml:"matrix_to_teams"`
+	TeamsToMatrix RoomChanges `yaml:"teams_to_matrix"`
+
 	displaynameTemplate *template.Template `yaml:"-"`
 	chatNameTemplate    *template.Template `yaml:"-"`
+	// What group chat rooms advertise, per MatrixToTeams.
+	groupCaps *event.RoomFeatures `yaml:"-"`
 }
 
 type BackfillConfig struct {
@@ -121,6 +127,22 @@ func (c CallsConfig) PostTranscripts() bool {
 	return c.MeetingTranscripts == nil || *c.MeetingTranscripts
 }
 
+// RoomChanges picks which changes to a chat's members, name, picture and pins
+// carry over in one direction. An absent key is on.
+type RoomChanges struct {
+	Invite  *bool `yaml:"invite"`
+	Kick    *bool `yaml:"kick"`
+	Rename  *bool `yaml:"rename"`
+	Pin     *bool `yaml:"pins"`
+	Picture *bool `yaml:"picture"`
+}
+
+func (c RoomChanges) Invites() bool  { return c.Invite == nil || *c.Invite }
+func (c RoomChanges) Kicks() bool    { return c.Kick == nil || *c.Kick }
+func (c RoomChanges) Renames() bool  { return c.Rename == nil || *c.Rename }
+func (c RoomChanges) Pins() bool     { return c.Pin == nil || *c.Pin }
+func (c RoomChanges) Pictures() bool { return c.Picture == nil || *c.Picture }
+
 // EndpointConfig lets the operator override Teams API hosts. Empty fields fall
 // back to the package defaults (commercial cloud).
 type EndpointConfig struct {
@@ -167,6 +189,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	c.groupCaps = groupRoomCaps(c.MatrixToTeams)
 	return nil
 }
 
@@ -216,4 +239,10 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "calls", "element_call")
 	helper.Copy(up.Bool, "calls", "video")
 	helper.Copy(up.Bool, "calls", "mirror_camera")
+	for _, key := range []string{"invite", "kick", "rename", "pins"} {
+		helper.Copy(up.Bool, "matrix_to_teams", key)
+	}
+	for _, key := range []string{"invite", "kick", "rename", "pins", "picture"} {
+		helper.Copy(up.Bool, "teams_to_matrix", key)
+	}
 }

@@ -34,6 +34,9 @@ import (
 // syncPins pins the messages pinned in Teams in place of the room's pins on
 // the chat's other bridged messages; pins of anything else stay.
 func (t *TeamsClient) syncPins(ctx context.Context, portal *bridgev2.Portal, teamsPins []string) {
+	if !t.Main.Config.TeamsToMatrix.Pins() {
+		return
+	}
 	log := zerolog.Ctx(ctx)
 	current, err := t.Main.roomPins(ctx, portal.MXID)
 	if err != nil {

@@ -30,22 +30,26 @@ import (
 // membership and lowers it by redacting the reaction.
 const raisedHandKey = "\U0001F590️"
 
-// Reacting with this to a lobby notice lets that person in; it is one of
-// Element's quick reactions.
-const admitKey = "\U0001F44D"
+// Reacting with these to a lobby notice lets that person in or turns them
+// away. Both are Element quick reactions, and the bridge puts them on each
+// notice to click.
+const (
+	admitKey = "\U0001F44D"
+	denyKey  = "\U0001F44E"
+)
 
 func raisedHand(memberEvent id.EventID) *event.ReactionEventContent {
 	return &event.ReactionEventContent{RelatesTo: event.RelatesTo{Type: event.RelAnnotation, EventID: memberEvent, Key: raisedHandKey}}
 }
 
 // handleCallReaction raises the hand of a user bridged into a Teams meeting
-// when Element Call does, and lets someone in from the lobby when the user
-// reacts to its notice.
+// when Element Call does, and lets someone in from the lobby or turns them
+// away when the user reacts to its notice.
 func (tc *TeamsConnector) handleCallReaction(ctx context.Context, evt *event.Event) {
 	rel, _ := evt.Content.Raw["m.relates_to"].(map[string]any)
 	key, _ := rel["key"].(string)
 	target, _ := rel["event_id"].(string)
-	if key != raisedHandKey && !strings.HasPrefix(key, admitKey) {
+	if key != raisedHandKey && !strings.HasPrefix(key, admitKey) && !strings.HasPrefix(key, denyKey) {
 		return
 	}
 	tc.withBridgedCall(ctx, evt.Sender, evt.RoomID, func(bc *bridgedCall) {
@@ -55,6 +59,8 @@ func (tc *TeamsConnector) handleCallReaction(ctx context.Context, evt *event.Eve
 			go bc.setHandRaised(true)
 		case strings.HasPrefix(key, admitKey) && bc.lobbyNotices[id.EventID(target)] != "":
 			go bc.admit(bc.lobbyNotices[id.EventID(target)])
+		case strings.HasPrefix(key, denyKey) && bc.lobbyNotices[id.EventID(target)] != "":
+			go bc.deny(bc.lobbyNotices[id.EventID(target)])
 		}
 	})
 }
@@ -143,6 +149,17 @@ func (bc *bridgedCall) admit(mri string) {
 		return
 	}
 	log.Info().Msg("Let someone in from the lobby")
+}
+
+func (bc *bridgedCall) deny(mri string) {
+	log := zerolog.Ctx(bc.ctx).With().Str("participant", mri).Logger()
+	if err := bc.call.Deny(bc.ctx, mri); err != nil {
+		if bc.ctx.Err() == nil {
+			log.Warn().Err(err).Msg("Failed to turn someone away from the lobby")
+		}
+		return
+	}
+	log.Info().Msg("Turned someone away from the lobby")
 }
 
 func (bc *bridgedCall) addToCall(mri string) {

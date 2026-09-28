@@ -28,6 +28,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
@@ -66,14 +67,22 @@ func TestMentionTarget(t *testing.T) {
 	}
 }
 
-// fakeMatrix stands in for the homeserver; rendering mentions only asks it
-// for ghost MXIDs.
-type fakeMatrix struct{ bridgev2.MatrixConnector }
+// fakeMatrix stands in for the homeserver: ghost MXIDs and a room's members.
+type fakeMatrix struct {
+	bridgev2.MatrixConnector
+	members map[id.UserID]*event.MemberEventContent
+}
 
 func (fakeMatrix) Init(*bridgev2.Bridge)         {}
 func (fakeMatrix) BotIntent() bridgev2.MatrixAPI { return fakeIntent{} }
-func (fakeMatrix) GhostIntent(userID networkid.UserID) bridgev2.MatrixAPI {
-	return fakeIntent{mxid: id.NewUserID("msteams_"+string(userID), "example.com")}
+func (f fakeMatrix) GhostIntent(userID networkid.UserID) bridgev2.MatrixAPI {
+	return fakeIntent{mxid: f.FormatGhostMXID(userID)}
+}
+func (fakeMatrix) FormatGhostMXID(userID networkid.UserID) id.UserID {
+	return id.NewUserID("msteams_"+string(userID), "example.com")
+}
+func (f fakeMatrix) GetMembers(context.Context, id.RoomID) (map[id.UserID]*event.MemberEventContent, error) {
+	return f.members, nil
 }
 
 type fakeIntent struct {

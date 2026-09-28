@@ -117,7 +117,9 @@ func (t *TeamsClient) queueChatResync(chat *msteams.Chat, info *bridgev2.ChatInf
 			},
 			PostHandleFunc: syncPins,
 		},
-		ChatInfo:        info,
+		GetChatInfoFunc: func(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+			return t.withoutTeamsChanges(ctx, portal, info)
+		},
 		LatestMessageTS: chat.LastUpdated, // non-zero unblocks the framework's backfill gate
 	})
 }
