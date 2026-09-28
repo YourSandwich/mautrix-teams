@@ -6,6 +6,15 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `matrix_to_teams` and `teams_to_matrix` switch invites, kicks, renames and
+  pins on or off per direction, and `teams_to_matrix.picture` group
+  pictures. Everything stays on by default; a new room always gets the
+  chat's name, picture and members.
+- Lobby notices come with 👍 and 👎 already on them to click: 👍 lets the
+  person in, 👎 turns them away.
+
 ## [31.2] - 2026-09-28
 
 ### Added
