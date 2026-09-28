@@ -115,21 +115,26 @@ var roomCaps = &event.RoomFeatures{
 	Reaction:        event.CapLevelFullySupported,
 }
 
-var groupRoomCaps = func() *event.RoomFeatures {
+// groupRoomCaps adds the changes a group chat room can make in Teams.
+func groupRoomCaps(c RoomChanges) *event.RoomFeatures {
 	caps := roomCaps.Clone()
-	caps.State = event.StateFeatureMap{
-		event.StateRoomName.Type: {Level: event.CapLevelFullySupported},
+	caps.State = event.StateFeatureMap{}
+	caps.MemberActions = event.MemberFeatureMap{}
+	if c.Renames() {
+		caps.State[event.StateRoomName.Type] = &event.StateFeatures{Level: event.CapLevelFullySupported}
 	}
-	caps.MemberActions = event.MemberFeatureMap{
-		event.MemberActionInvite: event.CapLevelFullySupported,
-		event.MemberActionKick:   event.CapLevelFullySupported,
+	if c.Invites() {
+		caps.MemberActions[event.MemberActionInvite] = event.CapLevelFullySupported
+	}
+	if c.Kicks() {
+		caps.MemberActions[event.MemberActionKick] = event.CapLevelFullySupported
 	}
 	return caps
-}()
+}
 
 func (t *TeamsClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
 	if isGroupThread(teamsid.ParsePortalID(portal.ID)) {
-		return groupRoomCaps
+		return t.Main.Config.groupCaps
 	}
 	return roomCaps
 }

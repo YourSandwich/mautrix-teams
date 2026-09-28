@@ -74,7 +74,7 @@ func TestHandleMatrixMembership(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	tc := &TeamsClient{Client: client, UserMRI: "8:orgid:me"}
+	tc := &TeamsClient{Main: &TeamsConnector{Config: loadConfig(t, "")}, Client: client, UserMRI: "8:orgid:me"}
 
 	change := func(thread string, target bridgev2.GhostOrUserLogin, typ bridgev2.MembershipChangeType) *bridgev2.MatrixMembershipChange {
 		msg := &bridgev2.MatrixMembershipChange{Target: target, Type: typ}
@@ -154,5 +154,24 @@ func TestRoomLinksStayLinks(t *testing.T) {
 	out, mentions := (&TeamsClient{}).matrixHTMLToTeams(in)
 	if out != in || len(mentions) != 0 {
 		t.Errorf("out %s, mentions %v", out, mentions)
+	}
+}
+
+// A nil Teams client proves nothing reaches Teams.
+func TestMatrixChangesSwitchedOff(t *testing.T) {
+	tc := &TeamsClient{Main: &TeamsConnector{Config: loadConfig(t, "matrix_to_teams: {invite: false, kick: false, rename: false}")}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "19:group@thread.v2"}}}
+	ghost := &bridgev2.Ghost{Ghost: &database.Ghost{ID: "00000000-0000-0000-0000-00000000000a"}}
+	for _, change := range []bridgev2.MembershipChangeType{bridgev2.Invite, bridgev2.Kick, bridgev2.RevokeInvite} {
+		msg := &bridgev2.MatrixMembershipChange{Target: ghost, Type: change}
+		msg.Portal = portal
+		if _, err := tc.HandleMatrixMembership(context.Background(), msg); !errors.Is(err, bridgev2.ErrMembershipNotSupported) {
+			t.Errorf("%+v: %v", change, err)
+		}
+	}
+	rename := &bridgev2.MatrixRoomName{}
+	rename.Portal = portal
+	if _, err := tc.HandleMatrixRoomName(context.Background(), rename); !errors.Is(err, bridgev2.ErrRoomMetadataNotSupported) {
+		t.Errorf("rename: %v", err)
 	}
 }

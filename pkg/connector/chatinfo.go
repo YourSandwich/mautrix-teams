@@ -46,9 +46,42 @@ func (t *TeamsClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 		return nil, err
 	}
 	if chat == nil {
-		return t.minimalChatInfo(portal, threadID), nil
+		return t.withoutTeamsChanges(ctx, portal, t.minimalChatInfo(portal, threadID))
 	}
-	return t.wrapChatInfo(ctx, chat), nil
+	return t.withoutTeamsChanges(ctx, portal, t.wrapChatInfo(ctx, chat))
+}
+
+// withoutTeamsChanges keeps an existing room from taking the changes
+// teams_to_matrix switches off; a new room gets the chat's name, picture and
+// members either way. A direct chat's name and avatar are the other person's.
+func (t *TeamsClient) withoutTeamsChanges(ctx context.Context, portal *bridgev2.Portal, info *bridgev2.ChatInfo) (*bridgev2.ChatInfo, error) {
+	cfg := t.Main.Config.TeamsToMatrix
+	if portal.MXID == "" {
+		return info, nil
+	}
+	if !cfg.Renames() && portal.RoomType != database.RoomTypeDM {
+		info.Name = nil
+	}
+	if !cfg.Pictures() && portal.RoomType != database.RoomTypeDM {
+		info.Avatar = nil
+	}
+	if info.Members == nil {
+		return info, nil
+	}
+	info.Members.IsFull = info.Members.IsFull && cfg.Kicks()
+	if !cfg.Invites() {
+		inRoom, err := t.Main.br.Matrix.GetMembers(ctx, portal.MXID)
+		if err != nil {
+			return nil, fmt.Errorf("read the room's members: %w", err)
+		}
+		for uid, member := range info.Members.MemberMap {
+			m := inRoom[t.Main.br.Matrix.FormatGhostMXID(uid)]
+			if !member.IsFromMe && (m == nil || m.Membership != event.MembershipJoin && m.Membership != event.MembershipInvite) {
+				delete(info.Members.MemberMap, uid)
+			}
+		}
+	}
+	return info, nil
 }
 
 func (t *TeamsClient) fetchTeamInfo(ctx context.Context, teamID string) (*bridgev2.ChatInfo, error) {

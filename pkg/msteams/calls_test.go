@@ -109,7 +109,7 @@ func newFakeController(t *testing.T, answer func(map[string]any) (string, string
 				t.Errorf("updateEndpointMetadata: %s, migration %v, body %v", r.Method, migration, metadata)
 			}
 			fmt.Fprint(w, `{"activeModalities":{"groupChat":{"threadId":"19:meeting_abc@thread.v2","messageId":"0"}}}`)
-		case "/leg/1/updateMediaDescriptions", "/mc/1/applyChannelParameters", "/cc/1/updateEndpointState", "/cc/1/publishState", "/cc/1/removeState", "/cc/1/admit":
+		case "/leg/1/updateMediaDescriptions", "/mc/1/applyChannelParameters", "/cc/1/updateEndpointState", "/cc/1/publishState", "/cc/1/removeState", "/cc/1/admit", "/cc/1/removeParticipant":
 			f.mu.Lock()
 			fail := r.URL.Path == "/cc/1/updateEndpointState" && f.failStates > 0
 			if fail {
@@ -546,6 +546,18 @@ func TestLobby(t *testing.T) {
 	links, _ := admit["links"].(map[string]any)
 	if len(to) != 1 || to[0].(map[string]any)["id"] != guest.MRI || links["admitSuccess"] == nil || participants["from"] == nil {
 		t.Errorf("admit = %v", admit)
+	}
+	if err := call.Deny(ctx, guest.MRI); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	deny := f.bodies["/cc/1/removeParticipant"]
+	f.mu.Unlock()
+	participants, _ = deny["participants"].(map[string]any)
+	to, _ = participants["to"].([]any)
+	links, _ = deny["links"].(map[string]any)
+	if len(to) != 1 || to[0].(map[string]any)["id"] != guest.MRI || links["removeParticipantFailure"] == nil || participants["from"] == nil {
+		t.Errorf("deny = %v", deny)
 	}
 }
 

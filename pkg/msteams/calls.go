@@ -722,8 +722,9 @@ func (call *Call) handle(cb callCallback) (ended bool, reason error) {
 		if a.SubCode == retargetSucceeded {
 			go call.repeatMuted(context.Background())
 		}
-	case strings.HasPrefix(cb.path, "conversation/addParticipant"), strings.HasPrefix(cb.path, "conversation/admit"):
-		call.c.log.Debug().Str("path", cb.path).RawJSON("body", cb.body).Msg("Teams answered adding a participant")
+	case strings.HasPrefix(cb.path, "conversation/addParticipant"), strings.HasPrefix(cb.path, "conversation/admit"),
+		strings.HasPrefix(cb.path, "conversation/removeParticipant"):
+		call.c.log.Debug().Str("path", cb.path).RawJSON("body", cb.body).Msg("Teams answered a change to the participants")
 		if failed := call.calleeFailed(cb.path, cb.body); failed != nil {
 			return true, failed
 		}
@@ -939,13 +940,26 @@ func (call *Call) CanAdmit() bool {
 // notification does. Teams answers on the admitSuccess or admitFailure
 // callback.
 func (call *Call) Admit(ctx context.Context, mri string) error {
+	return call.decideLobby(ctx, "admit", mri)
+}
+
+// Deny turns someone in the lobby away. The web client has no call of its own
+// for it: it removes them from the conversation, and Teams answers on the
+// removeParticipantSuccess or removeParticipantFailure callback.
+func (call *Call) Deny(ctx context.Context, mri string) error {
+	return call.decideLobby(ctx, "removeParticipant", mri)
+}
+
+// decideLobby posts the conversation operation op for someone, with its
+// Success and Failure callbacks.
+func (call *Call) decideLobby(ctx context.Context, op, mri string) error {
 	body := map[string]any{
 		"participants": map[string]any{"from": call.from, "to": []any{map[string]any{"id": mri}}},
-		"links":        cbLinks(call.callback, "conversation/", "admitSuccess", "admitFailure"),
+		"links":        cbLinks(call.callback, "conversation/", op+"Success", op+"Failure"),
 		"debugContent": map[string]any{"causeId": newUUIDv4()},
 	}
-	if _, err := call.post(ctx, insertPath(call.controller, "/admit"), newUUIDv4(), true, body, nil); err != nil {
-		return fmt.Errorf("admit: %w", err)
+	if _, err := call.post(ctx, insertPath(call.controller, "/"+op), newUUIDv4(), true, body, nil); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
 	}
 	return nil
 }

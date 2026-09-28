@@ -44,6 +44,32 @@ presence:
     # on the homeserver; off by default because every change is a write there.
     sync_teams_presence: false
 
+# Which changes to a chat's members, name, picture and pins carry over, per
+# direction. Messages, reactions and edits always do, and a new room always
+# gets the chat's name, picture and members.
+matrix_to_teams:
+    # Invites, kicks and renames apply to group and meeting chats only.
+    # Inviting a Teams user's ghost adds them to the Teams chat.
+    invite: true
+    # Kicking a ghost removes them from the Teams chat.
+    kick: true
+    # Renaming the room renames the Teams chat.
+    rename: true
+    # Pinning or unpinning a message does the same in Teams.
+    pins: true
+teams_to_matrix:
+    # People added to the Teams chat join the room. Off, they still join once
+    # they send a message.
+    invite: true
+    # People removed from or leaving the Teams chat leave the room.
+    kick: true
+    # Renaming the Teams chat renames the room.
+    rename: true
+    # Teams pins show as the room's pinned messages.
+    pins: true
+    # A group chat's picture becomes the room's avatar.
+    picture: true
+
 # Override Teams API endpoints. Leave empty to use the commercial-cloud defaults.
 endpoints:
     chat_svc: ""

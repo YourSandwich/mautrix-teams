@@ -305,7 +305,7 @@ func (t *TeamsClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matr
 
 func (t *TeamsClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.MatrixRoomName) (bool, error) {
 	threadID := teamsid.ParsePortalID(msg.Portal.ID)
-	if !isGroupThread(threadID) {
+	if !isGroupThread(threadID) || !t.Main.Config.MatrixToTeams.Renames() {
 		return false, bridgev2.ErrRoomMetadataNotSupported
 	}
 	if err := t.Client.SetTopic(ctx, threadID, msg.Content.Name); err != nil {
@@ -333,10 +333,11 @@ func (t *TeamsClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.
 		return nil, bridgev2.ErrMembershipNotSupported
 	}
 	mri := teamsid.ParseUserID(ghost.ID)
-	switch msg.Type {
-	case bridgev2.Invite:
+	cfg := t.Main.Config.MatrixToTeams
+	switch {
+	case msg.Type == bridgev2.Invite && cfg.Invites():
 		return nil, t.Client.AddMember(ctx, threadID, mri)
-	case bridgev2.Kick, bridgev2.RevokeInvite:
+	case (msg.Type == bridgev2.Kick || msg.Type == bridgev2.RevokeInvite) && cfg.Kicks():
 		return nil, t.Client.RemoveMember(ctx, threadID, mri)
 	}
 	return nil, bridgev2.ErrMembershipNotSupported

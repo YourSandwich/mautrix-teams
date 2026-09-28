@@ -132,8 +132,16 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 	}
 	portalKey := teamsid.MakePortalKey(ev.ThreadID, t.UserLogin.ID, t.splitPortals())
 	change := &bridgev2.ChatInfoChange{}
+	cfg := t.Main.Config.TeamsToMatrix
+	joined, left := upd.Joined, upd.Left
+	if !cfg.Invites() {
+		joined = nil
+	}
+	if !cfg.Kicks() {
+		left = nil
+	}
 	switch {
-	case upd.Picture:
+	case upd.Picture && cfg.Pictures():
 		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
 			EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portalKey},
 			GetChatInfoFunc: func(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
@@ -145,7 +153,7 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 				return info, err
 			},
 		})
-	case upd.Pins:
+	case upd.Pins && cfg.Pins():
 		// Queued behind the chat's earlier events, so a message pinned right
 		// after it was sent is bridged by then.
 		t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ChatResync{
@@ -162,7 +170,7 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 				},
 			},
 		})
-	case upd.Topic == nil:
+	case upd.Topic == nil || !cfg.Renames():
 	case *upd.Topic == "":
 		// A cleared topic falls back to a name built from the roster, which
 		// needs a fresh fetch of the chat.
@@ -178,15 +186,15 @@ func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {
 		})
 		change.ChatInfo = &bridgev2.ChatInfo{Name: &name}
 	}
-	if change.ChatInfo == nil && len(upd.Joined)+len(upd.Left) == 0 {
+	if change.ChatInfo == nil && len(joined)+len(left) == 0 {
 		return
 	}
-	if len(upd.Joined)+len(upd.Left) > 0 {
-		members := make(bridgev2.ChatMemberMap, len(upd.Joined)+len(upd.Left))
-		for _, mri := range upd.Joined {
+	if len(joined)+len(left) > 0 {
+		members := make(bridgev2.ChatMemberMap, len(joined)+len(left))
+		for _, mri := range joined {
 			members.Set(t.chatMember(mri, event.MembershipJoin))
 		}
-		for _, mri := range upd.Left {
+		for _, mri := range left {
 			members.Set(t.chatMember(mri, event.MembershipLeave))
 		}
 		change.MemberChanges = &bridgev2.ChatMemberList{MemberMap: members}
