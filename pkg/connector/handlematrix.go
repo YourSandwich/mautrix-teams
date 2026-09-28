@@ -88,7 +88,7 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 	case event.MsgImage, event.MsgFile, event.MsgVideo, event.MsgAudio:
 		media, files, err := t.matrixMediaToTeams(ctx, msg)
 		if err != nil {
-			return nil, err
+			return nil, failedSend(err)
 		}
 		caption, mentions := t.captionToTeams(msg.Content)
 		content = media + caption
@@ -113,7 +113,7 @@ func (t *TeamsClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 
 	id, err := t.Client.SendMessage(ctx, threadID, content, opts)
 	if err != nil {
-		return nil, err
+		return nil, failedSend(err)
 	}
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
@@ -228,7 +228,7 @@ func (t *TeamsClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.Matrix
 		newContent = msg.Content.NewContent
 	}
 	content, contentType, mentions := t.matrixContentToTeams(newContent)
-	return t.Client.EditMessage(ctx, threadID, messageID, content, msteams.SendOptions{ContentType: contentType, Mentions: mentions})
+	return failedSend(t.Client.EditMessage(ctx, threadID, messageID, content, msteams.SendOptions{ContentType: contentType, Mentions: mentions}))
 }
 
 func (t *TeamsClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {
@@ -390,6 +390,15 @@ func (t *TeamsClient) matrixHTMLToTeams(in string) (string, []msteams.Mention) {
 		)
 	})
 	return out, mentions
+}
+
+// failedSend makes a failed send show in the room with its reason, which
+// bridgev2 only does for errors that ask for it.
+func failedSend(err error) error {
+	if err == nil {
+		return nil
+	}
+	return bridgev2.WrapErrorInStatus(err).WithSendNotice(true).WithErrorAsMessage()
 }
 
 // importancePattern finds a leading !important or !urgent, which marks a
