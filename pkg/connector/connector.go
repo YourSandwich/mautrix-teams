@@ -27,9 +27,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/mautrix-teams/pkg/matrixrtc"
+	"go.mau.fi/mautrix-teams/pkg/teamsmedia"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/matrix"
@@ -55,6 +57,10 @@ type TeamsConnector struct {
 	// The latest ring a Matrix user's Element Call sent in each room, for a
 	// one-to-one call's other side to decline: id.RoomID to id.EventID.
 	rings sync.Map
+
+	turnLock    sync.Mutex
+	turn        *teamsmedia.TURNServer
+	turnExpires time.Time
 }
 
 var _ bridgev2.NetworkConnector = (*TeamsConnector)(nil)

@@ -40,6 +40,10 @@ import (
 type bridgedVideo struct {
 	enabled, mirror bool
 	leg             atomic.Pointer[teamsmedia.VideoLeg]
+	// In a one-to-one call: the other side, whose tile shows whatever the
+	// call's video lines carry, and what the other side asks keyframes of.
+	peer                   string
+	cameraKeys, screenKeys chan struct{}
 	// Wakes watchVideo, for a new roster or video leg.
 	changed chan struct{}
 
@@ -101,9 +105,28 @@ func (v *bridgedVideo) removeTile(mri string) {
 // attach takes over the video lines of the call's media, which ride on its
 // audio leg; the slots of a new leg start out unsubscribed.
 func (v *bridgedVideo) attach(ctx context.Context, leg *teamsmedia.VideoLeg) {
+	slots := leg.Slots()
 	v.lock.Lock()
-	v.bindings = make([]videoBinding, len(leg.Slots()))
+	v.bindings = make([]videoBinding, len(slots))
+	var tile *videoTile
+	if v.peer != "" {
+		// A one-to-one call's lines all carry the other side.
+		tile = v.tiles[v.peer]
+		for i := range v.bindings {
+			v.bindings[i].mri = v.peer
+		}
+	}
 	v.lock.Unlock()
+	// What the other side of a one-to-one call stops sending leaves its tile.
+	for _, slot := range slots {
+		switch {
+		case tile == nil || slot.Sending:
+		case slot.ScreenShare:
+			tile.screen.stop(tile.room, true)
+		default:
+			tile.camera.stop(tile.room, false)
+		}
+	}
 	v.leg.Store(leg)
 	zerolog.Ctx(ctx).Info().Strs("mids", leg.Mids()).Interface("send_limits", leg.SendLimits()).Msg("Connected Teams video")
 	go v.pumpToLiveKit(ctx, leg)
@@ -235,7 +258,8 @@ func (o *videoOut) stop(room *lksdk.Room, screenShare bool) {
 
 // setSending turns the Matrix user's camera or screen share on or off in
 // Teams.
-func (v *bridgedVideo) setSending(ctx context.Context, call *msteams.Call, screen, on bool) {
+func (bc *bridgedCall) setSending(screen, on bool) {
+	v := &bc.video
 	v.sendLock.Lock()
 	defer v.sendLock.Unlock()
 	if screen {
@@ -244,12 +268,71 @@ func (v *bridgedVideo) setSending(ctx context.Context, call *msteams.Call, scree
 		v.cameraOn = on
 	}
 	leg := v.leg.Load()
-	if leg == nil || ctx.Err() != nil {
+	if leg == nil || bc.ctx.Err() != nil {
+		return
+	}
+	if bc.call.Direct() {
+		bc.offerVideo(screen)
 		return
 	}
 	state := v.stateLocked(leg)
-	if err := call.SetVideo(ctx, state); err != nil {
-		zerolog.Ctx(ctx).Warn().Err(err).Bool("camera", state.Camera).Bool("screen_share", state.Screen).Msg("Failed to switch video in Teams")
+	if err := bc.call.SetVideo(bc.ctx, state); err != nil {
+		zerolog.Ctx(bc.ctx).Warn().Err(err).Bool("camera", state.Camera).Bool("screen_share", state.Screen).Msg("Failed to switch video in Teams")
+	}
+}
+
+// offerVideo switches the Matrix user's camera and screen share in a
+// one-to-one call with an offer of the bridge's own, as the web client
+// switches its own; the video's sendLock is held.
+func (bc *bridgedCall) offerVideo(screen bool) {
+	v, audio := &bc.video, bc.leg.Load()
+	stream := "v"
+	if screen {
+		stream = "ss"
+	}
+	log := zerolog.Ctx(bc.ctx).With().Bool("camera", v.cameraOn).Bool("screen_share", v.screenOn).Logger()
+	answer, err := bc.call.Renegotiate(bc.ctx, audio.Reoffer(v.cameraOn, v.screenOn), v.cameraOn, v.screenOn, stream)
+	var video *teamsmedia.VideoLeg
+	if err == nil {
+		video, err = audio.ApplyAnswer(answer)
+	}
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to switch video in the one-to-one call")
+		return
+	}
+	if video != nil {
+		v.attach(bc.ctx, video)
+	}
+	log.Info().Msg("Switched video in the one-to-one call")
+}
+
+// forwardKeyFrameRequests passes on what a one-to-one call's other side asks
+// keyframes of to the camera or screen share it names.
+func (v *bridgedVideo) forwardKeyFrameRequests(ctx context.Context, requests <-chan uint32) {
+	for {
+		var ssrc uint32
+		select {
+		case <-ctx.Done():
+			return
+		case ssrc = <-requests:
+		}
+		leg := v.leg.Load()
+		if leg == nil {
+			continue
+		}
+		var keys chan struct{}
+		switch camera, screen := leg.SSRCs(); ssrc {
+		case camera:
+			keys = v.cameraKeys
+		case screen:
+			keys = v.screenKeys
+		default:
+			continue
+		}
+		select {
+		case keys <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -371,6 +454,13 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 	if screen {
 		what, controls, keyFrames = "screen share", bc.call.ScreenControls(), nil
 	}
+	// A one-to-one call's other side asks keyframes of its own.
+	if bc.call.Direct() {
+		keyFrames = bc.video.cameraKeys
+		if screen {
+			keyFrames = bc.video.screenKeys
+		}
+	}
 	log := zerolog.Ctx(bc.ctx).With().Str("codec", mimeType).Str("video", what).Logger()
 	send := func(pkt *rtp.Packet) {
 		switch leg := bc.video.leg.Load(); {
@@ -415,10 +505,10 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 	info := pub.TrackInfo()
 	log.Info().Uint32("width", info.GetWidth()).Uint32("height", info.GetHeight()).Msg("Sending Matrix video to Teams")
 	// A camera can start out muted, which no mute event reports.
-	bc.video.setSending(bc.ctx, bc.call, screen, screen || !pub.IsMuted())
-	defer bc.video.setSending(bc.ctx, bc.call, screen, false)
+	bc.setSending(screen, screen || !pub.IsMuted())
+	defer bc.setSending(screen, false)
 	// Teams names the size it wants right after the video goes on, which
-	// spares an encoder restart.
+	// spares an encoder restart; a one-to-one call names it in the answer.
 	var limits teamsmedia.VideoLimits
 	if leg := bc.video.leg.Load(); leg != nil {
 		limits = leg.SendLimits()
@@ -426,12 +516,14 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 			limits = leg.ScreenSendLimits()
 		}
 	}
-	select {
-	case params := <-controls:
-		limits = teamsmedia.ParseVideoLimits(params)
-	case <-time.After(2 * time.Second):
-	case <-bc.ctx.Done():
-		return
+	if !bc.call.Direct() {
+		select {
+		case params := <-controls:
+			limits = teamsmedia.ParseVideoLimits(params)
+		case <-time.After(2 * time.Second):
+		case <-bc.ctx.Done():
+			return
+		}
 	}
 	switch {
 	case !transcode:

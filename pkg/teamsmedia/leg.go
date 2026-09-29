@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,8 +50,16 @@ type Config struct {
 	// Key the offer with DTLS for a call straight to another Teams endpoint,
 	// as the web client places one-to-one calls to people.
 	Direct bool
+	// Also offer a relayed address on this TURN server: the other end of a
+	// direct call can't reach a bridge behind a NAT that maps every
+	// destination to a port of its own.
+	TURN *TURNServer
 
 	includeLoopback bool
+}
+
+type TURNServer struct {
+	URI, Username, Password string
 }
 
 type AudioLeg struct {
@@ -68,6 +77,14 @@ type AudioLeg struct {
 	ts  uint32
 
 	sentPackets, sentOctets, receivedPackets atomic.Uint32
+
+	// A direct call's lines as last negotiated, which every new offer keeps
+	// in order, and whether the bridge sends its camera and screen share.
+	offerLock      sync.Mutex
+	lines          []mediaLine
+	camera, screen bool
+	nextMid        int
+	version        int
 }
 
 func NewAudioLeg(ctx context.Context, cfg Config) (*AudioLeg, error) {
@@ -90,12 +107,19 @@ func NewAudioLeg(ctx context.Context, cfg Config) (*AudioLeg, error) {
 }
 
 func (l *AudioLeg) localAudio() localAudio {
-	return localAudio{localTransport: l.local, opus: l.opus, ssrc: l.ssrc}
+	return localAudio{localTransport: l.local, opus: l.opus, ssrc: l.ssrc, version: l.version}
 }
 
 func (l *AudioLeg) SDP() string {
-	if l.videoSSRC == 0 {
+	switch {
+	case l.videoSSRC == 0:
 		return audioSDP(l.localAudio())
+	case l.local.fingerprint != "":
+		l.offerLock.Lock()
+		defer l.offerLock.Unlock()
+		l.lines = directLines()
+		l.nextMid = len(l.lines)
+		return l.directOffer()
 	}
 	return offerSDP(l.localAudio(), &localVideo{ssrc: l.videoSSRC})
 }
@@ -127,6 +151,9 @@ func (l *AudioLeg) AnswerSDP(offer string, withVideo bool) (string, *VideoLeg, e
 	if err != nil {
 		return "", nil, err
 	}
+	// The other side's new offers and the bridge's own share the leg's state.
+	l.offerLock.Lock()
+	defer l.offerLock.Unlock()
 	switch {
 	case remote.opusPT < 0:
 		return "", nil, errors.New("teamsmedia: offer has no opus")
@@ -148,6 +175,9 @@ func (l *AudioLeg) AnswerSDP(offer string, withVideo bool) (string, *VideoLeg, e
 	}
 	l.codec = "opus"
 	l.pt.Store(uint32(remote.opusPT))
+	if withVideo && remote.dtls() {
+		return l.answerDirect(remote)
+	}
 	var video *VideoLeg
 	var lv *localVideo
 	if withVideo {
@@ -160,6 +190,29 @@ func (l *AudioLeg) AnswerSDP(offer string, withVideo bool) (string, *VideoLeg, e
 		old.retire()
 	}
 	return answerSDP(l.localAudio(), lv, remote), video, nil
+}
+
+// answerDirect answers a direct call's offer: its video keeps the leg's
+// SSRCs, and each line says what the bridge sends on it; offerLock is held.
+func (l *AudioLeg) answerDirect(offer *remoteAudio) (string, *VideoLeg, error) {
+	if l.videoSSRC == 0 {
+		l.videoSSRC = randomVideoSSRC()
+	}
+	l.noteOffer(offer)
+	video := acceptVideo(l.transport, offer, l.videoSSRC)
+	var lv *localVideo
+	if video != nil {
+		v := video.localVideo()
+		lv = &v
+	}
+	if old := l.video.Swap(video); old != nil {
+		old.retire()
+	}
+	l.version++
+	audio := l.localAudio()
+	answer := *offer
+	answer.lines = l.directAnswerLines(offer)
+	return answerSDP(audio, lv, &answer), video, nil
 }
 
 // useDTLS gives the leg its DTLS certificate, once.
@@ -188,6 +241,9 @@ func (l *AudioLeg) Connect(ctx context.Context, remoteSDP string, controlling bo
 		l.codec = remote.codec
 		l.pt.Store(uint32(remote.payloadType))
 		if l.videoSSRC != 0 {
+			l.offerLock.Lock()
+			l.noteAnswer(remote)
+			l.offerLock.Unlock()
 			l.video.Store(acceptVideo(l.transport, remote, l.videoSSRC))
 		}
 	}

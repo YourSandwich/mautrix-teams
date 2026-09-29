@@ -51,7 +51,7 @@ func (c *Client) AttachCall(ctx context.Context, inc *IncomingCall, displayName 
 		return nil, err
 	}
 	call.participant, call.chainID, call.controller, call.incoming = inc.participant, inc.CallID, inc.controller, inc
-	call.offerType = inc.offerType
+	call.offerType, call.mediaLegID = inc.offerType, inc.mediaLegID
 	call.from = call.participantFrom(displayName)
 	c.callsByEndpoint.Store(call.endpointID, call)
 	cb := call.callback
@@ -120,7 +120,7 @@ func (call *Call) Accept(ctx context.Context, sdpAnswer string) error {
 		"links":                           call.acceptanceLinks(),
 		"clientContentForMediaController": cbLinks(call.callback, "call/", "controlVideoStreaming", "csrcInfo"),
 		"mediaContent": map[string]any{
-			"blob": sdpAnswer, "contentType": call.offerType, "mediaLegId": call.incoming.mediaLegID,
+			"blob": sdpAnswer, "contentType": call.offerType, "mediaLegId": call.mediaLegID,
 		},
 		"pstnContent":           map[string]any{"emergencyCallCountry": "", "platformName": "mautrix-teams", "publicApiCall": false},
 		"callKeepAliveInterval": nil,

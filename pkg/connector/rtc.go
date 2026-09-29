@@ -33,6 +33,7 @@ import (
 	"go.mau.fi/mautrix-teams/pkg/matrixrtc"
 	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
+	"go.mau.fi/mautrix-teams/pkg/teamsmedia"
 )
 
 const ghostCallDevice = "TEAMSCALL"
@@ -73,6 +74,34 @@ func (tc *TeamsConnector) rtcTransport(ctx context.Context) (matrixrtc.Transport
 	}
 	tc.transport = transport
 	return transport, nil
+}
+
+// turnServer is the homeserver's TURN server, which gives a direct call a
+// relayed address the other side can reach; nil when there is none.
+func (tc *TeamsConnector) turnServer(ctx context.Context) *teamsmedia.TURNServer {
+	tc.turnLock.Lock()
+	defer tc.turnLock.Unlock()
+	if time.Now().Before(tc.turnExpires) {
+		return tc.turn
+	}
+	bot, ok := tc.br.Bot.(*matrix.ASIntent)
+	if !ok {
+		return nil
+	}
+	resp, err := bot.Matrix.TurnServer(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to get TURN credentials from the homeserver")
+		return nil
+	}
+	tc.turn = nil
+	for _, uri := range resp.URIs {
+		if strings.HasPrefix(uri, "turn:") && !strings.Contains(uri, "transport=tcp") {
+			tc.turn = &teamsmedia.TURNServer{URI: uri, Username: resp.Username, Password: resp.Password}
+			break
+		}
+	}
+	tc.turnExpires = time.Now().Add(time.Duration(resp.TTL) * time.Second / 2)
+	return tc.turn
 }
 
 // syncLiveMeetings reconciles the calls shown in existing portals with the

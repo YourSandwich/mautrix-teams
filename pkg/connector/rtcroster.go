@@ -163,6 +163,13 @@ func (t *TeamsClient) followRoster(bc *bridgedCall, call *msteams.Call, live *li
 			}
 		}
 		t.syncCallMembers(bc, roster, holder, members)
+		// In a one-to-one call the holder's tile carries the other side's
+		// voice alone, where a meeting's mixes everyone's.
+		if call.Direct() {
+			if i := slices.IndexFunc(roster, func(p msteams.Participant) bool { return p.MRI == holder }); i >= 0 {
+				bc.holderPub.SetMuted(roster[i].Muted)
+			}
+		}
 		t.showLobby(bc, call.Lobby(), call.CanAdmit(), lobby)
 		speakers := make(map[uint32]*speakerTrack, len(members)+1)
 		for _, p := range roster {

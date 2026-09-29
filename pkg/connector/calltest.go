@@ -91,7 +91,12 @@ func (r callTestResult) String() string {
 
 func (t *TeamsClient) runCallTest(ctx context.Context, target, threadID string) string {
 	start := time.Now()
-	leg, err := teamsmedia.NewAudioLeg(ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer, Direct: msteams.PeerToPeer(target)})
+	direct := msteams.PeerToPeer(target)
+	var turn *teamsmedia.TURNServer
+	if direct {
+		turn = t.Main.turnServer(ctx)
+	}
+	leg, err := teamsmedia.NewAudioLeg(ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer, Direct: direct, TURN: turn})
 	if err != nil {
 		return "Couldn't set up call media: " + err.Error()
 	}

@@ -46,9 +46,12 @@ type bridgedCall struct {
 	call   *msteams.Call
 	// Teams moves the media to a new leg when it renegotiates.
 	leg atomic.Pointer[teamsmedia.AudioLeg]
+	// The relay a direct call's legs offer, nil in meetings.
+	turn *teamsmedia.TURNServer
 	// Teams mixes the meeting audio into one stream, which plays on the
 	// holder's tile; speakers maps audio sources to the tiles they light up.
 	holderVoice *speakerTrack
+	holderPub   *lksdk.LocalTrackPublication
 	publisher   *lksdk.Room
 	speakers    atomic.Pointer[map[uint32]*speakerTrack]
 	video       bridgedVideo
@@ -72,7 +75,7 @@ type bridgedCall struct {
 }
 
 func newBridgedCall(ctx context.Context) *bridgedCall {
-	bc := &bridgedCall{video: bridgedVideo{changed: make(chan struct{}, 1)}, lobbyNotices: map[id.EventID]string{}}
+	bc := &bridgedCall{video: bridgedVideo{changed: make(chan struct{}, 1), cameraKeys: make(chan struct{}, 1), screenKeys: make(chan struct{}, 1)}, lobbyNotices: map[id.EventID]string{}}
 	bc.ctx, bc.cancel = context.WithCancel(ctx)
 	return bc
 }
@@ -235,13 +238,23 @@ func (t *TeamsClient) connectBridgedCall(live *liveCall, bc *bridgedCall) (*mste
 	waitPublisher := sync.OnceValue(func() error { return <-published })
 	// Offering video right away gives meetings video without a lobby, which
 	// would otherwise renegotiate it in.
-	video := t.Main.Config.Calls.Video && live.direct == ""
+	// A person's call runs straight between the ends, a bot's through Teams's
+	// media servers; video takes a direct call keyed with DTLS or a meeting.
+	peer := live.direct != "" && msteams.PeerToPeer(live.direct)
+	video := t.Main.Config.Calls.Video && (live.direct == "" || peer && (live.incoming == nil || live.incoming.Direct()))
+	if peer {
+		bc.turn = t.Main.turnServer(ctx)
+		bc.video.peer = live.direct
+	}
 	leg, err := teamsmedia.NewAudioLeg(ctx, teamsmedia.Config{
-		STUNServer: t.Main.Config.Calls.STUNServer, Opus: true, Video: video,
-		Direct: live.direct != "" && live.incoming == nil && msteams.PeerToPeer(live.direct),
+		STUNServer: t.Main.Config.Calls.STUNServer, Opus: true, Video: video, TURN: bc.turn,
+		Direct: peer && live.incoming == nil,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("set up media: %w", err)
+	}
+	if peer {
+		zerolog.Ctx(ctx).Info().Str("candidates", leg.Candidates()).Msg("Gathered media for a one-to-one call")
 	}
 	bc.onClose(func() { _ = leg.Close() })
 	var call *msteams.Call
@@ -257,7 +270,7 @@ func (t *TeamsClient) connectBridgedCall(live *liveCall, bc *bridgedCall) (*mste
 			return nil, err
 		}
 		var answer string
-		if answer, _, err = leg.AnswerSDP(live.offer, false); err == nil {
+		if answer, _, err = leg.AnswerSDP(live.offer, video); err == nil {
 			err = call.Accept(ctx, answer)
 		}
 	case live.code != nil:
@@ -287,10 +300,11 @@ func (t *TeamsClient) connectBridgedCall(live *liveCall, bc *bridgedCall) (*mste
 	if err := leg.Connect(connectCtx, remote, controlling); err != nil {
 		return nil, fmt.Errorf("connect meeting media: %w", err)
 	}
+	zerolog.Ctx(ctx).Debug().Strs("remote", teamsmedia.Describe(remote)).Str("codec", leg.Codec()).Msg("Teams's side of the call's media")
 	if leg.Codec() != "opus" {
 		return nil, fmt.Errorf("teams chose %s audio; only opus is bridged", leg.Codec())
 	}
-	zerolog.Ctx(ctx).Debug().Strs("remote", teamsmedia.Describe(remote)).Msg("Teams's side of the call's media")
+	zerolog.Ctx(ctx).Info().Str("route", leg.Route()).Msg("Connected the call's media")
 	bc.leg.Store(leg)
 	go t.followRenegotiations(bc, call)
 	go pumpToLiveKit(bc)
@@ -303,7 +317,11 @@ func (t *TeamsClient) connectBridgedCall(live *liveCall, bc *bridgedCall) (*mste
 		if video := leg.Video(); video != nil {
 			bc.video.attach(ctx, video)
 		}
-		go watchVideo(bc, t.UserMRI)
+		if call.Direct() {
+			go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests())
+		} else {
+			go watchVideo(bc, t.UserMRI)
+		}
 	}
 	bc.subscribeMatrixUser()
 	if pointToChat {
@@ -345,7 +363,7 @@ func (t *TeamsClient) connectPublisher(bc *bridgedCall, intent *appservice.Inten
 			case pub.Kind() == lksdk.TrackKindAudio:
 				go bc.setMuted(muted)
 			case bc.video.enabled && pub.Source() == livekit.TrackSource_CAMERA:
-				go bc.video.setSending(bc.ctx, bc.call, false, !muted)
+				go bc.setSending(false, !muted)
 			}
 		}
 	}
@@ -358,11 +376,11 @@ func (t *TeamsClient) connectPublisher(bc *bridgedCall, intent *appservice.Inten
 		return err
 	}
 	bc.onClose(room.Disconnect)
-	voice, _, err := publishVoice(room)
+	voice, pub, err := publishVoice(room)
 	if err != nil {
 		return err
 	}
-	bc.holderVoice = voice
+	bc.holderVoice, bc.holderPub = voice, pub
 	bc.publisher = room
 	return nil
 }
@@ -441,17 +459,19 @@ func (t *TeamsClient) followRenegotiations(bc *bridgedCall, call *msteams.Call) 
 // Otherwise the answer goes on a new leg, which both pumps move to once it is
 // connected.
 func (t *TeamsClient) renegotiate(bc *bridgedCall, call *msteams.Call, offer msteams.Renegotiation) (newConnection bool, err error) {
-	if current := bc.leg.Load(); current.KeepsConnection(offer.Offer) {
+	current := bc.leg.Load()
+	if current.KeepsConnection(offer.Offer) {
 		video, err := answerRenegotiation(bc, call, offer, current)
 		if err == nil && video != nil {
 			bc.video.attach(bc.ctx, video)
 		}
 		return false, err
 	}
-	leg, err := teamsmedia.NewAudioLeg(bc.ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer})
+	leg, err := teamsmedia.NewAudioLeg(bc.ctx, teamsmedia.Config{STUNServer: t.Main.Config.Calls.STUNServer, Opus: true, TURN: bc.turn})
 	if err != nil {
 		return true, fmt.Errorf("set up media: %w", err)
 	}
+	leg.KeepSending(current)
 	bc.onClose(func() { _ = leg.Close() })
 	defer func() {
 		if err != nil {
@@ -472,6 +492,9 @@ func (t *TeamsClient) renegotiate(bc *bridgedCall, call *msteams.Call, offer mst
 	if video != nil {
 		bc.video.attach(bc.ctx, video)
 	}
+	if call.Direct() {
+		go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests())
+	}
 	return true, nil
 }
 
@@ -482,7 +505,16 @@ func answerRenegotiation(bc *bridgedCall, call *msteams.Call, offer msteams.Rene
 	if err != nil {
 		return nil, err
 	}
-	return video, call.AnswerRenegotiation(bc.ctx, offer, answer, bc.video.state(video))
+	// A one-to-one call's answer names its lines alone; the Matrix user's
+	// state would wait for a video switch of the bridge's own in flight.
+	var state msteams.VideoState
+	switch {
+	case !call.Direct():
+		state = bc.video.state(video)
+	case video != nil:
+		state.Mids = video.Mids()
+	}
+	return video, call.AnswerRenegotiation(bc.ctx, offer, answer, state)
 }
 
 // Packets written while the leg is being replaced are dropped.

@@ -171,6 +171,9 @@ func TestDirectCallOffer(t *testing.T) {
 	if strings.Contains(offer, "a=crypto:") {
 		t.Error("a direct offer has SDES keys")
 	}
+	if strings.Contains(offer, "PCMU") {
+		t.Error("a direct Opus offer lets the callee pick PCMU")
+	}
 
 	callee, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
