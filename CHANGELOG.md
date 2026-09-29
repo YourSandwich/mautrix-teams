@@ -6,6 +6,25 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- One-to-one calls with Teams users work, and are experimental: voice, and
+  with `calls.video` cameras and screen sharing both ways. See the README for
+  what they need beyond Element Call.
+
+### Fixed
+
+- One-to-one calls reach the other side from behind any NAT: the bridge also
+  offers a relayed address on the homeserver's TURN server, and only offers
+  Opus, which it bridges.
+- A one-to-one call no longer ends as soon as it connects when the other
+  side's Teams lists comfort noise first among its codecs.
+- Mute shows on both sides of a one-to-one call.
+- A call you placed that nobody answered no longer shows as a missed call:
+  it says "No answer from" the person you called, or "Call declined by".
+- Messages, edits and reactions Teams refuses with "too many requests" are
+  sent again after the wait Teams asks for, instead of failing.
+
 ## [31.3] - 2026-09-28
 
 ### Added

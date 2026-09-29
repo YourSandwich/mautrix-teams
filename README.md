@@ -14,8 +14,9 @@ their own login flow, which is new and not yet verified end to end.
 Functional. Most day-to-day chat features round-trip in both directions.
 Teams meetings and group calls can be joined from Element Call with audio,
 camera video and screen sharing, and meetings can be created from Matrix.
-One-to-one calls are work in progress, and a couple of niche Teams-only
-features are not bridged yet (see the matrix below).
+One-to-one calls work too, including video and screen sharing, but are
+experimental. A couple of niche Teams-only features are not bridged yet (see
+the matrix below).
 
 ![A Teams meeting in Element Call next to the Teams web client](docs/images/video-call.png)
 
@@ -76,7 +77,7 @@ participant's camera shows in Element Call.
 | Create a meeting to invite people to          | yes             | -               |
 | Ring a Teams user into a meeting (invite)     | yes             | -               |
 | Admit or deny in a meeting's lobby (reaction) | yes             | -               |
-| One-to-one calls (Element Call)               | in progress     | in progress     |
+| One-to-one calls (Element Call)               | experimental    | experimental    |
 | Own status, status note, out of office        | yes             | -               |
 | Teams audio call self-test (`call-test`)      | yes             | -               |
 | End-to-bridge encryption                      | yes             | yes             |
@@ -262,10 +263,20 @@ into it by inviting their ghost to the room. For each person waiting in the
 lobby the bridge posts a notice with 👍 and 👎 on it: click 👍 to let them in,
 👎 to turn them away.
 
-One-to-one calls are work in progress: a call started in a one-to-one chat
-calls the other side in Teams, and their calls ring in Matrix, to answer by
-joining the call in their chat's room. These calls run directly between the
-two ends, so a bridge behind NAT needs `calls.stun_server`.
+One-to-one calls are experimental: they work, with cameras and screen sharing
+both ways, but have seen few tests. A call started in a one-to-one chat rings
+the other side in Teams, and their calls ring in Matrix, to answer by joining
+the call in their chat's room. Element offers these calls as video calls;
+turn the camera off before joining for voice only. They run directly between
+the two ends rather than through Microsoft's media servers, so on top of the
+setup above they need:
+
+- `calls.stun_server` when the bridge sits behind NAT.
+- A TURN server on the homeserver (Synapse's `turn_uris` and
+  `turn_shared_secret`) when the bridge's NAT gives every destination a port
+  of its own. The bridge fetches credentials for it from the homeserver and
+  offers a relayed address next to its own.
+- `calls.video` for cameras and screen sharing.
 
 `call-test` checks the Teams side of calls by calling the Teams Echo bot.
 
@@ -280,8 +291,8 @@ Graph v1.0 description, regenerated with
 
 ## Limitations
 
-- **Calls**: one-to-one calls are work in progress, audio only, and ring in
-  Matrix for work accounts only. Meeting video shows at most 9 Teams cameras
+- **Calls**: one-to-one calls are experimental and ring in Matrix for work
+  accounts only. Meeting video shows at most 9 Teams cameras
   at a time. Calls in encrypted rooms aren't supported. The chat of a
   meeting hosted by a personal account or another organisation isn't
   reachable for a guest, so only its call is bridged.
