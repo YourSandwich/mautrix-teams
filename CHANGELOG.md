@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [31.4] - 2026-09-30
+
 ### Added
 
 - One-to-one calls with Teams users work, and are experimental: voice, and
