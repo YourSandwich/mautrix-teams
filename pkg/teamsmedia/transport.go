@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,8 @@ type transport struct {
 	dtlsCert *dtlsCertificate
 	// The SSRC Teams sends its reports from.
 	remoteSSRC atomic.Uint32
+	// The SSRCs of the bridge's streams the other side asks keyframes for.
+	keyFrames chan uint32
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -93,6 +96,9 @@ func (r *remoteTransport) dtls() bool {
 	return r.fingerprint != "" && len(r.keys) == 0
 }
 
+// relayGatherWait bounds how long a leg waits for its TURN allocation.
+const relayGatherWait = 5 * time.Second
+
 func newTransport(ctx context.Context, cfg Config) (*transport, error) {
 	local := localTransport{
 		ufrag: randomHex(4),
@@ -100,19 +106,33 @@ func newTransport(ctx context.Context, cfg Config) (*transport, error) {
 		key:   randomBytes(30),
 	}
 	candidateTypes := []ice.CandidateType{ice.CandidateTypeHost}
-	opts := []ice.AgentOption{
-		ice.WithLocalCredentials(local.ufrag, local.pwd),
-		ice.WithNetworkTypes([]ice.NetworkType{ice.NetworkTypeUDP4}),
-	}
+	var urls []*stun.URI
 	if cfg.STUNServer != "" {
 		uri, err := stun.ParseURI("stun:" + cfg.STUNServer)
 		if err != nil {
 			return nil, fmt.Errorf("parse stun server: %w", err)
 		}
-		opts = append(opts, ice.WithUrls([]*stun.URI{uri}))
+		urls = append(urls, uri)
 		candidateTypes = append(candidateTypes, ice.CandidateTypeServerReflexive)
 	}
-	opts = append(opts, ice.WithCandidateTypes(candidateTypes))
+	// A relay that doesn't answer mustn't hold up a ringing call.
+	var relayWait <-chan time.Time
+	if cfg.TURN != nil {
+		uri, err := stun.ParseURI(cfg.TURN.URI)
+		if err != nil {
+			return nil, fmt.Errorf("parse turn server: %w", err)
+		}
+		uri.Username, uri.Password = cfg.TURN.Username, cfg.TURN.Password
+		urls = append(urls, uri)
+		candidateTypes = append(candidateTypes, ice.CandidateTypeRelay)
+		relayWait = time.After(relayGatherWait)
+	}
+	opts := []ice.AgentOption{
+		ice.WithLocalCredentials(local.ufrag, local.pwd),
+		ice.WithNetworkTypes([]ice.NetworkType{ice.NetworkTypeUDP4}),
+		ice.WithUrls(urls),
+		ice.WithCandidateTypes(candidateTypes),
+	}
 	if cfg.includeLoopback {
 		opts = append(opts, ice.WithIncludeLoopback())
 	}
@@ -134,6 +154,7 @@ func newTransport(ctx context.Context, cfg Config) (*transport, error) {
 	}
 	select {
 	case <-gathered:
+	case <-relayWait:
 	case <-ctx.Done():
 		_ = agent.Close()
 		return nil, ctx.Err()
@@ -152,10 +173,14 @@ func newTransport(ctx context.Context, cfg Config) (*transport, error) {
 		_ = agent.Close()
 		return nil, errors.New("teamsmedia: no usable local address")
 	}
-	return &transport{agent: agent, local: local, stop: make(chan struct{}), received: newReceiveEstimate(time.Now())}, nil
+	return &transport{agent: agent, local: local, keyFrames: make(chan uint32, 8), stop: make(chan struct{}), received: newReceiveEstimate(time.Now())}, nil
 }
 
 func (t *transport) connect(ctx context.Context, remote remoteTransport, controlling bool) error {
+	// A new offer on a running connection may leave its candidates out.
+	if len(remote.candidates) == 0 {
+		return errors.New("teamsmedia: remote sdp has no usable udp candidates")
+	}
 	for _, c := range remote.candidates {
 		if err := t.agent.AddRemoteCandidate(c); err != nil {
 			return fmt.Errorf("add remote candidate: %w", err)
@@ -167,7 +192,7 @@ func (t *transport) connect(ctx context.Context, remote remoteTransport, control
 	}
 	conn, err := dial(ctx, remote.ufrag, remote.pwd)
 	if err != nil {
-		return fmt.Errorf("ice: %w", err)
+		return fmt.Errorf("ice (ours: %s; theirs: %s): %w", describeCandidates(t.local.candidates), describeCandidates(remote.candidates), err)
 	}
 	if remote.dtls() {
 		t.conn, t.remote = conn, remote
@@ -189,6 +214,42 @@ func (t *transport) connect(ctx context.Context, remote remoteTransport, control
 	}
 	t.conn, t.enc, t.remote = conn, enc, remote
 	return nil
+}
+
+// KeyFrameRequests delivers the SSRC of each of the bridge's streams the
+// other side asks a keyframe for, as a direct call's peer does with RTCP.
+func (t *transport) KeyFrameRequests() <-chan uint32 {
+	return t.keyFrames
+}
+
+// requestKeyFrame drops requests nobody reads, as in meetings.
+func (t *transport) requestKeyFrame(ssrc uint32) {
+	select {
+	case t.keyFrames <- ssrc:
+	default:
+	}
+}
+
+// Candidates lists the addresses the leg offers, for logs.
+func (t *transport) Candidates() string {
+	return describeCandidates(t.local.candidates)
+}
+
+// Route names the candidate pair the connection runs on, for logs.
+func (t *transport) Route() string {
+	pair, err := t.agent.GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return ""
+	}
+	return describeCandidates([]ice.Candidate{pair.Local}) + " -> " + describeCandidates([]ice.Candidate{pair.Remote})
+}
+
+func describeCandidates(candidates []ice.Candidate) string {
+	parts := make([]string, len(candidates))
+	for i, c := range candidates {
+		parts[i] = fmt.Sprintf("%s %s:%d", c.Type(), c.Address(), c.Port())
+	}
+	return strings.Join(parts, ", ")
 }
 
 // keeps reports whether an offer keeps this connection's remote ICE
@@ -283,6 +344,11 @@ func (t *transport) handleRTCP(packet []byte) {
 		// MS-RTP application feedback names its type after the SSRCs.
 		case plain[1] == 206 && plain[0]&0x1F == 15 && size >= 20 && binary.BigEndian.Uint16(plain[12:]) == afbDominantSpeakers:
 			t.dominant.Store(binary.BigEndian.Uint32(plain[16:]))
+		// A PLI names the stream after the sender, a FIR in its entry.
+		case plain[1] == 206 && plain[0]&0x1F == 1 && size >= 12:
+			t.requestKeyFrame(binary.BigEndian.Uint32(plain[8:]))
+		case plain[1] == 206 && plain[0]&0x1F == 4 && size >= 16:
+			t.requestKeyFrame(binary.BigEndian.Uint32(plain[12:]))
 		}
 		plain = plain[size:]
 	}

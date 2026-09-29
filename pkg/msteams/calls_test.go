@@ -140,6 +140,18 @@ func newFakeController(t *testing.T, answer func(map[string]any) (string, string
 			case "/incoming/accept":
 				fmt.Fprintf(w, `{"callAcceptanceAcknowledgement":{"links":{"updateMediaDescriptions":%q}}}`, f.srv.URL+"/leg/1/updateMediaDescriptions")
 			}
+		case "/cc/1/renegotiate", "/mediaAnswers/1/acknowledge":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.mu.Lock()
+			f.bodies[r.URL.Path] = body
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			// Teams passes the other side's answer on to the offer's link.
+			if r.URL.Path == "/cc/1/renegotiate" {
+				answer := fmt.Sprintf(`{"mediaAnswer":{"mediaContent":{"blob":"v=0 video answer"},"links":{"mediaAcknowledgement":%q}}}`, f.srv.URL+"/mediaAnswers/1/acknowledge?i=3")
+				go f.c.dispatchTrouterRequest(link(body, "mediaNegotiation", "links", "mediaAnswer"), []byte(answer))
+			}
 		case "/negotiations/1/answer":
 			var answer map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&answer)
@@ -384,6 +396,59 @@ func TestPlaceDirectCall(t *testing.T) {
 	f.mu.Unlock()
 	if renegotiated["contentType"] != "application/sdp-ngc-1.0" {
 		t.Errorf("renegotiation answer %v", renegotiated)
+	}
+}
+
+// A direct call switches its video with an offer of its own, as the web
+// client does, and acknowledges the answer Teams passes on.
+func TestRenegotiateDirectCall(t *testing.T) {
+	var f *fakeController
+	f = newFakeController(t, func(created map[string]any) (string, string) {
+		return link(created, "callInvitation", "links", "acceptance"),
+			fmt.Sprintf(`{"callAcceptance":{"mediaContent":{"blob":"v=0 answer"},"links":{"mediaRenegotiation":%q}}}`, f.srv.URL+"/cc/1/renegotiate")
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	call, _, err := f.c.PlaceCall(ctx, "19:a_b@unq.gbl.spaces", "8:orgid:b", "Me", "v=0 offer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !call.Direct() {
+		t.Error("a call to a person isn't direct")
+	}
+	answer, err := call.Renegotiate(ctx, "v=0 video offer", true, false, "v")
+	if err != nil || answer != "v=0 video answer" {
+		t.Fatalf("answer %q, %v", answer, err)
+	}
+	f.mu.Lock()
+	created, sent, acked := f.bodies["/epconv"], f.bodies["/cc/1/renegotiate"], f.seen[len(f.seen)-1]
+	f.mu.Unlock()
+	negotiation, _ := sent["mediaNegotiation"].(map[string]any)
+	media, _ := negotiation["mediaContent"].(map[string]any)
+	legID := created["callInvitation"].(map[string]any)["mediaContent"].(map[string]any)["mediaLegId"]
+	if media["blob"] != "v=0 video offer" || media["contentType"] != "application/sdp-ngc-1.0" || media["mediaLegId"] != legID ||
+		!strings.HasSuffix(media["negotiationTag"].(string), ";v_1") || fmt.Sprint(negotiation["callModalities"]) != "[Audio Video]" {
+		t.Errorf("renegotiation %v", negotiation)
+	}
+	if acked != "/mediaAnswers/1/acknowledge?i=3" {
+		t.Errorf("last request %q, want the acknowledgement", acked)
+	}
+
+	// Mute goes out with the endpoint properties of a direct call.
+	if err := call.SetMuted(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	state, _ := f.bodies["/cc/1/updateEndpointState"]["endpointState"].(map[string]any)
+	f.mu.Unlock()
+	if props, _ := state["endpointProperties"].(map[string]any); props["additionalEndpointProperties"] == nil || props["preheatProperties"] != nil {
+		t.Errorf("endpoint state %v", state)
+	}
+	// The other side's mute comes without media streams.
+	f.c.dispatchTrouterRequest(call.callback("conversation/rosterUpdate/"), []byte(
+		`{"participants":{"8:orgid:b":{"version":1,"state":"active","endpoints":{"e2":{"call":{"serverMuteVersion":0},"endpointState":{"endpointStateSequenceNumber":2,"state":{"isMuted":true}}}}}}}`))
+	if roster := call.Roster(); !slices.ContainsFunc(roster, func(p Participant) bool { return p.MRI == "8:orgid:b" && p.Muted }) {
+		t.Errorf("roster %+v, want the other side muted", roster)
 	}
 }
 
@@ -773,7 +838,14 @@ func TestMeetingRoster(t *testing.T) {
 	if got := call.Roster(); len(got) != 1 || !got[0].HandRaised {
 		t.Errorf("roster with a raised hand = %v", got)
 	}
+	// Only the endpoint with the audio says whether someone in a meeting is
+	// muted.
 	update(`{"type":"Delta","participants":{"8:orgid:colleague":{"version":4,"state":"active","details":{"displayName":"Colleague"},
+		"endpoints":{"e2":{"endpointState":{"endpointStateSequenceNumber":2,"state":{"isMuted":true}},"call":{}}}}}}`)
+	if got := call.Roster(); len(got) != 1 || got[0].Muted {
+		t.Errorf("roster muted a meeting participant without audio: %+v", got)
+	}
+	update(`{"type":"Delta","participants":{"8:orgid:colleague":{"version":5,"state":"active","details":{"displayName":"Colleague"},
 		"endpoints":{"e2":{"endpointState":{"endpointStateSequenceNumber":3,"state":{"isMuted":true}},"call":{"mediaStreams":[
 			{"type":"audio","label":"main-audio","sourceId":201,"direction":"sendrecv"},
 			{"type":"video","label":"main-video","sourceId":202,"direction":"sendrecv"},

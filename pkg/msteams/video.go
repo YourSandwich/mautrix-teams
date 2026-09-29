@@ -28,9 +28,12 @@ import (
 // come with the acceptance or a renegotiation's acknowledgement, and the
 // media controller's keyframe requests.
 type callVideo struct {
-	lock      sync.Mutex
-	links     map[string]string
-	keyFrames chan struct{}
+	lock  sync.Mutex
+	links map[string]string
+	// Where a direct call's own renegotiations go, which a person's
+	// acceptance may name without the other links.
+	renegotiation string
+	keyFrames     chan struct{}
 	// The latest sender control for the camera and for the screen share;
 	// only the newest counts.
 	controls, screenControls chan string
@@ -46,12 +49,20 @@ type controlVideoStreaming struct {
 }
 
 func (v *callVideo) storeLinks(links map[string]string) {
-	if links["updateMediaDescriptions"] == "" {
-		return
-	}
 	v.lock.Lock()
-	v.links = links
-	v.lock.Unlock()
+	defer v.lock.Unlock()
+	if link := links["mediaRenegotiation"]; link != "" {
+		v.renegotiation = link
+	}
+	if links["updateMediaDescriptions"] != "" {
+		v.links = links
+	}
+}
+
+func (v *callVideo) renegotiationLink() string {
+	v.lock.Lock()
+	defer v.lock.Unlock()
+	return v.renegotiation
 }
 
 func (v *callVideo) link(name string) string {

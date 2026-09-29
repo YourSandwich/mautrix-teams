@@ -63,6 +63,8 @@ type VideoSlot struct {
 	StreamID    uint32 // Teams's x-source-streamid, named in subscriptions
 	ScreenShare bool
 	PayloadType uint8
+	// Whether the other side says it sends on the line.
+	Sending bool
 	// The SSRCs Teams sends from on the line.
 	first, last uint32
 }
@@ -73,8 +75,14 @@ type VideoSlot struct {
 // ssrc on. It returns nil when there is no main video.
 func acceptVideo(t *transport, offer *remoteAudio, ssrc uint32) *VideoLeg {
 	v := &VideoLeg{transport: t, ssrc: ssrc}
+	// In a direct call, keyed with DTLS, the one camera line carries both
+	// ends' cameras, where a meeting forwards cameras on lines of their own.
+	direct := t.local.fingerprint != ""
 	for _, m := range offer.lines {
 		switch {
+		case m.isMainVideo() && len(v.mids) == 0 && direct:
+			v.pt, v.limits = uint8(m.h264PT), ParseVideoLimits(m.h264Params)
+			v.slots = append(v.slots, VideoSlot{Mid: m.mid, PayloadType: uint8(m.h264PT), Sending: sends(m.direction), first: m.ssrcFirst, last: m.ssrcLast})
 		case m.isMainVideo() && len(v.mids) == 0:
 			v.pt, v.limits = uint8(m.h264PT), ParseVideoLimits(m.h264Params)
 		case m.isScreenShare() && v.screenMid == "":
@@ -84,7 +92,7 @@ func acceptVideo(t *transport, offer *remoteAudio, ssrc uint32) *VideoLeg {
 		case m.isMainVideo(), m.isScreenShare():
 			v.slots = append(v.slots, VideoSlot{
 				Mid: m.mid, StreamID: m.streamID, ScreenShare: m.isScreenShare(), PayloadType: uint8(m.h264PT),
-				first: m.ssrcFirst, last: m.ssrcLast,
+				Sending: sends(m.direction), first: m.ssrcFirst, last: m.ssrcLast,
 			})
 		default:
 			continue
@@ -118,6 +126,11 @@ func (v *VideoLeg) localVideo() localVideo {
 // control says otherwise.
 func (v *VideoLeg) SendLimits() VideoLimits {
 	return v.limits
+}
+
+// SSRCs are those the bridge sends its camera and its screen share from.
+func (v *VideoLeg) SSRCs() (camera, screen uint32) {
+	return v.ssrc, v.screenSSRC
 }
 
 // ScreenMid is the screen-share line, empty when the offer has none.

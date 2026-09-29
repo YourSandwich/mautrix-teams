@@ -39,6 +39,8 @@ type localAudio struct {
 	localTransport
 	opus bool
 	ssrc uint32
+	// The o= line's session version, which a direct call's new offers raise.
+	version int
 }
 
 type localVideo struct {
@@ -56,11 +58,32 @@ func (v *localVideo) lineSSRC(index int) uint32 {
 }
 
 func (m *mediaLine) isMainVideo() bool {
-	return m.media == "video" && m.label == "main-video" && m.h264PT >= 0
+	return !m.rejected && m.media == "video" && m.label == "main-video" && m.h264PT >= 0
 }
 
 func (m *mediaLine) isScreenShare() bool {
-	return m.media == "video" && m.label == "applicationsharing-video" && m.h264PT >= 0
+	return !m.rejected && m.media == "video" && m.label == "applicationsharing-video" && m.h264PT >= 0
+}
+
+// answerDirection answers an offered direction; send is whether the bridge
+// has something to send on the line.
+func answerDirection(offered string, send bool) string {
+	switch {
+	case offered == "sendonly":
+		return "recvonly"
+	case offered == "inactive", offered == "recvonly" && !send:
+		return "inactive"
+	case offered == "recvonly":
+		return "sendonly"
+	case send:
+		return "sendrecv"
+	}
+	return "recvonly"
+}
+
+// sends reports whether a direction has its side sending.
+func sends(direction string) bool {
+	return direction == "" || direction == "sendrecv" || direction == "sendonly"
 }
 
 func audioSDP(l localAudio) string {
@@ -68,7 +91,10 @@ func audioSDP(l localAudio) string {
 	if l.opus {
 		opusPT = 111
 	}
-	return writeSDP(l, nil, []mediaLine{{media: "audio", mid: "0"}}, opusPT, true, "2")
+	// A direct call's other end always has Opus; offered PCMU as well, it
+	// could answer with PCMU, which isn't bridged.
+	pcmu := !l.opus || l.fingerprint == ""
+	return writeSDP(l, nil, []mediaLine{{media: "audio", mid: "0"}}, opusPT, pcmu, "2")
 }
 
 // The video lines Teams offers when it renegotiates a meeting call, in its
@@ -106,7 +132,7 @@ func writeSDP(l localAudio, video *localVideo, lines []mediaLine, opusPT int, pc
 		fmt.Fprintf(&b, format+"\r\n", args...)
 	}
 	line("v=0")
-	line("o=- 0 0 IN IP4 %s", l.ip)
+	line("o=- 0 %d IN IP4 %s", l.version, l.ip)
 	line("s=session")
 	line("c=IN IP4 %s", l.ip)
 	line("b=CT:99980")
@@ -127,7 +153,7 @@ func writeSDP(l localAudio, video *localVideo, lines []mediaLine, opusPT int, pc
 	videoLines := 0
 	for _, m := range lines {
 		if video != nil && (m.isMainVideo() || m.isScreenShare()) {
-			writeVideoLine(line, l.localTransport, video, m, videoLines)
+			writeVideoLine(line, l.localTransport, video, m, videoLines, fmt.Sprintf("%08x", l.ssrc))
 			videoLines++
 			continue
 		}
@@ -183,12 +209,23 @@ func writeSDP(l localAudio, video *localVideo, lines []mediaLine, opusPT int, pc
 
 // Like the web client's answer: every bundled line repeats the port, ICE
 // credentials and key of the audio line, which alone carries candidates.
-func writeVideoLine(line func(string, ...any), t localTransport, v *localVideo, m mediaLine, index int) {
+// stream names the audio's media stream, which a direct call's video joins
+// for lip sync.
+func writeVideoLine(line func(string, ...any), t localTransport, v *localVideo, m mediaLine, index int, stream string) {
 	line("m=video %d RTP/SAVP %d", t.port, m.h264PT)
-	if index == 0 {
+	switch {
+	case t.fingerprint != "":
+		// A WebRTC endpoint maps RTP to the line by the SSRC it declares.
+		ssrc := v.lineSSRC(index)
+		line("a=x-ssrc-range:%d-%d", ssrc, ssrc)
+		if sends(m.local) {
+			line("a=msid:%s %08x", stream, ssrc)
+			line("a=ssrc:%d cname:%s", ssrc, stream)
+		}
+	case index == 0:
 		line("a=x-ssrc-range:%d-%d", v.ssrc, v.ssrc+99)
 		line("a=x-source:main-video")
-	} else {
+	default:
 		line("a=x-ssrc-range:%d-%d", v.lineSSRC(index), v.lineSSRC(index))
 	}
 	// Source requests and sender control ("vc") go by signaling, as the web
@@ -200,7 +237,7 @@ func writeVideoLine(line func(string, ...any), t localTransport, v *localVideo, 
 	line("a=mid:%s", m.mid)
 	line("a=rtpmap:%d H264/90000", m.h264PT)
 	line("a=fmtp:%d level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", m.h264PT)
-	line("a=sendrecv")
+	line("a=%s", firstNonEmpty(m.local, "sendrecv"))
 	line("a=rtcp-mux")
 	line("a=label:%s", m.label)
 	line("a=ice-ufrag:%s", t.ufrag)
@@ -236,6 +273,10 @@ type srtpKey struct {
 // it. Teams repeats the session's SDES keys on every line.
 type mediaLine struct {
 	media, formats, mid, label, cryptoTag string
+	// The line's direction as its SDP states it, and, on lines the bridge
+	// writes for a direct call, the bridge's own; rejected lines have port 0.
+	direction, local string
+	rejected         bool
 	// Teams's stream ID for the line and the SSRCs it sends from on it.
 	streamID            uint32
 	ssrcFirst, ssrcLast uint32
@@ -254,6 +295,15 @@ func (m *mediaLine) addAttribute(attr string) {
 	case "x-source-streamid":
 		id, _ := strconv.ParseUint(value, 10, 32)
 		m.streamID = uint32(id)
+	case "sendrecv", "sendonly", "recvonly", "inactive":
+		m.direction = name
+	case "ssrc":
+		// WebRTC endpoints may declare their SSRC without a range.
+		if m.ssrcFirst == 0 {
+			id, _, _ := strings.Cut(value, " ")
+			n, _ := strconv.ParseUint(id, 10, 32)
+			m.ssrcFirst, m.ssrcLast = uint32(n), uint32(n)
+		}
 	case "x-ssrc-range":
 		first, last, _ := strings.Cut(value, "-")
 		a, _ := strconv.ParseUint(first, 10, 32)
@@ -285,6 +335,9 @@ type remoteAudio struct {
 	lines       []mediaLine
 }
 
+// auxiliaryCodecs go along with an audio codec rather than carrying the voice.
+var auxiliaryCodecs = map[string]bool{"cn": true, "telephone-event": true, "red": true}
+
 // A line scanner, not an SDP parser: Teams SDP has vendor attributes and
 // line orders that strict parsers reject.
 func parseRemoteAudio(blob string) (*remoteAudio, error) {
@@ -293,7 +346,8 @@ func parseRemoteAudio(blob string) (*remoteAudio, error) {
 		return nil, err
 	}
 	var r remoteAudio
-	var sessionUfrag, sessionPwd, firstPT string
+	var sessionUfrag, sessionPwd string
+	var audioFormats []string
 	codecs := map[string]string{}
 	section := "session"
 	r.opusPT = -1
@@ -302,11 +356,11 @@ func parseRemoteAudio(blob string) (*remoteAudio, error) {
 		if media, ok := strings.CutPrefix(ln, "m="); ok {
 			fields := strings.Fields(media)
 			section = fields[0]
-			if section == "audio" && len(fields) > 3 && firstPT == "" {
-				firstPT = fields[3]
+			if section == "audio" && len(fields) > 3 && audioFormats == nil {
+				audioFormats = fields[3:]
 			}
 			if len(fields) > 3 {
-				r.lines = append(r.lines, mediaLine{media: fields[0], formats: strings.Join(fields[3:], " "), h264PT: -1})
+				r.lines = append(r.lines, mediaLine{media: fields[0], formats: strings.Join(fields[3:], " "), h264PT: -1, rejected: fields[1] == "0"})
 			}
 			continue
 		}
@@ -354,12 +408,17 @@ func parseRemoteAudio(blob string) (*remoteAudio, error) {
 			}
 		}
 	}
-	r.codec = codecs[firstPT]
-	if r.codec == "" && firstPT == "0" {
-		r.codec = "pcmu"
-	}
-	if pt, err := strconv.ParseUint(firstPT, 10, 7); err == nil {
-		r.payloadType = uint8(pt)
+	// Teams lists comfort noise and the like among its codecs, first even,
+	// also in answers to offers without them.
+	for _, pt := range audioFormats {
+		codec := codecs[pt]
+		if codec == "" && pt == "0" {
+			codec = "pcmu"
+		}
+		if n, err := strconv.ParseUint(pt, 10, 7); err == nil && codec != "" && !auxiliaryCodecs[codec] {
+			r.codec, r.payloadType = codec, uint8(n)
+			break
+		}
 	}
 	r.ufrag = firstNonEmpty(r.ufrag, sessionUfrag)
 	r.pwd = firstNonEmpty(r.pwd, sessionPwd)
@@ -368,8 +427,6 @@ func parseRemoteAudio(blob string) (*remoteAudio, error) {
 		return nil, errors.New("teamsmedia: remote sdp has no ice credentials")
 	case len(r.keys) == 0 && r.fingerprint == "":
 		return nil, fmt.Errorf("teamsmedia: remote sdp has neither a %s key nor a dtls fingerprint", srtpSuite)
-	case len(r.candidates) == 0:
-		return nil, errors.New("teamsmedia: remote sdp has no usable udp candidates")
 	}
 	return &r, nil
 }

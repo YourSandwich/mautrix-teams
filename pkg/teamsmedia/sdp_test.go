@@ -116,6 +116,25 @@ func TestParseTeamsAnswer(t *testing.T) {
 	}
 }
 
+// Teams lists comfort noise and DTMF among its codecs, first even.
+func TestAnswerCodecSkipsComfortNoise(t *testing.T) {
+	answer := strings.Join([]string{
+		"v=0", "o=- 1 2 IN IP4 192.0.2.10", "s=-", "t=0 0",
+		"m=audio 52245 RTP/SAVP 96 111 13 126", "c=IN IP4 192.0.2.10",
+		"a=rtpmap:96 CN/48000", "a=rtpmap:111 opus/48000/2", "a=rtpmap:13 CN/8000", "a=rtpmap:126 telephone-event/8000",
+		"a=ice-ufrag:tEsT", "a=ice-pwd:abcdefghijklmnopqrstuvwx",
+		"a=fingerprint:sha-256 " + strings.TrimSuffix(strings.Repeat("AB:", 32), ":"), "a=setup:active",
+		"a=candidate:1 1 udp 2122260223 192.0.2.20 48261 typ host", "",
+	}, "\r\n")
+	r, err := parseRemoteAudio(answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.codec != "opus" || r.payloadType != 111 {
+		t.Errorf("codec %q, payload type %d", r.codec, r.payloadType)
+	}
+}
+
 func TestDecodeSDPBlob(t *testing.T) {
 	var buf bytes.Buffer
 	w, _ := flate.NewWriter(&buf, flate.BestCompression)

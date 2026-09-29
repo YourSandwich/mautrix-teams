@@ -38,6 +38,8 @@ const (
 	// answer.
 	callAnswerWait = time.Minute
 	lobbyWait      = 5 * time.Minute
+	// How long a direct call's other side has to answer the bridge's new offer.
+	renegotiationWait = 15 * time.Second
 )
 
 // The capabilities the web client names in one-to-one calls; what the bits
@@ -88,6 +90,12 @@ type Call struct {
 	// The SDP dialect of a call straight between endpoints, which answers use
 	// too; empty for calls through Teams's media servers.
 	offerType string
+	// A direct call's media leg, which its renegotiations name.
+	mediaLegID string
+	// The other side's answers to the bridge's own renegotiations, one at a
+	// time.
+	answers         chan callCallback
+	renegotiateLock sync.Mutex
 	// Set for a call that rang the user, with the links attaching to it gave.
 	incoming      *IncomingCall
 	incomingLinks map[string]string
@@ -217,7 +225,7 @@ func (p *rosterParticipant) inLobby() bool {
 	return lobby
 }
 
-func (p *rosterParticipant) participant(mri string) Participant {
+func (p *rosterParticipant) participant(mri string, direct bool) Participant {
 	out := Participant{
 		MRI: mri, DisplayName: p.Details.DisplayName,
 		HandRaised: slices.ContainsFunc(p.PublishedStates, func(s publishedState) bool { return s.StateType == "raiseHands" }),
@@ -225,6 +233,10 @@ func (p *rosterParticipant) participant(mri string) Participant {
 	for _, ep := range p.Endpoints {
 		if ep.Call == nil {
 			continue
+		}
+		// A direct call's roster lists no media streams.
+		if direct && out.AudioSource == 0 {
+			out.Muted = ep.EndpointState.State.IsMuted
 		}
 		for _, stream := range ep.Call.MediaStreams {
 			switch {
@@ -369,6 +381,7 @@ func (c *Client) newCall(ctx context.Context, threadID string) (*Call, error) {
 		threadID:    threadID,
 		callbacks:   make(chan callCallback, 16),
 		offers:      make(chan Renegotiation, 4),
+		answers:     make(chan callCallback, 1),
 		roster:      callRoster{changed: make(chan struct{}, 1)},
 		video:       callVideo{keyFrames: make(chan struct{}, 1), controls: make(chan string, 1), screenControls: make(chan string, 1), tag: newUUIDv4(), requestID: 1},
 		ended:       make(chan struct{}),
@@ -386,7 +399,8 @@ func (call *Call) place(ctx context.Context, target, displayName, sdpOffer strin
 		body["groupChat"] = nil
 		body["clientEndpointCapabilities"] = webClientCapabilities
 		media := body["callInvitation"].(map[string]any)["mediaContent"].(map[string]any)
-		media["contentType"], media["mediaLegId"], media["requiredFeatures"] = directContentType, newMediaLegID(), "nonByPass"
+		call.mediaLegID = newMediaLegID()
+		media["contentType"], media["mediaLegId"], media["requiredFeatures"] = directContentType, call.mediaLegID, "nonByPass"
 	}
 	if _, err := call.createConversation(ctx, body); err != nil {
 		return "", err
@@ -714,6 +728,12 @@ func (call *Call) handle(cb callCallback) (ended bool, reason error) {
 	_ = json.Unmarshal(cb.body, &p)
 	call.video.storeLinks(p.Links)
 	switch n := p.MediaNegotiation; {
+	case call.Direct() && (strings.HasPrefix(cb.path, "call/mediaAnswer") || strings.HasPrefix(cb.path, "call/rejection")):
+		select {
+		case call.answers <- cb:
+		default:
+			call.c.log.Warn().Str("path", cb.path).Msg("Dropping an answer to a media renegotiation nobody waits for")
+		}
 	case n != nil && n.Links.MediaAnswer != "":
 		call.queueRenegotiation(Renegotiation{Offer: n.MediaContent.Blob, answerURL: n.Links.MediaAnswer, legID: n.MediaContent.MediaLegID})
 	case p.MediaAcknowledgement != nil:
@@ -794,9 +814,17 @@ func (call *Call) Renegotiations() <-chan Renegotiation {
 // may carry video lines too; the answer says what the bridge sends on them.
 func (call *Call) AnswerRenegotiation(ctx context.Context, r Renegotiation, sdpAnswer string, video VideoState) error {
 	media := map[string]any{"contentType": firstNonEmpty(call.offerType, "application/sdp"), "blob": sdpAnswer, "mediaLegId": r.legID}
+	modalities := []string{"Audio"}
+	switch {
+	case !call.Direct():
+		modalities = call.videoMedia(media, video)
+	// A direct call has no media controller to describe the lines to.
+	case len(video.Mids) > 0:
+		modalities = append(modalities, "Video")
+	}
 	_, err := call.post(ctx, r.answerURL, newUUIDv4(), true, map[string]any{
 		"mediaAnswer": map[string]any{
-			"callModalities":                  call.videoMedia(media, video),
+			"callModalities":                  modalities,
 			"sender":                          call.from,
 			"links":                           cbLinks(call.callback, "call/", "mediaAcknowledgement"),
 			"clientContentForMediaController": cbLinks(call.callback, "call/", "controlVideoStreaming", "csrcInfo"),
@@ -807,6 +835,94 @@ func (call *Call) AnswerRenegotiation(ctx context.Context, r Renegotiation, sdpA
 		return fmt.Errorf("answer media renegotiation: %w", err)
 	}
 	return nil
+}
+
+// Direct reports whether the call runs straight between the endpoints, as a
+// one-to-one call with a person does, instead of through Teams's media
+// servers.
+func (call *Call) Direct() bool {
+	return call.offerType == directContentType
+}
+
+// Renegotiate offers new media on a direct call, as the web client does to
+// switch its camera or screen share, and returns the other side's answer.
+// stream names what the offer switches, "v" for the camera or "ss" for the
+// screen share.
+func (call *Call) Renegotiate(ctx context.Context, sdpOffer string, camera, screen bool, stream string) (string, error) {
+	url := call.video.renegotiationLink()
+	if url == "" {
+		return "", errors.New("teams named no link to renegotiate the call's media")
+	}
+	call.renegotiateLock.Lock()
+	defer call.renegotiateLock.Unlock()
+	// An answer that came after an earlier offer gave up isn't this one's.
+	select {
+	case <-call.answers:
+	default:
+	}
+	modalities := []string{"Audio"}
+	if camera {
+		modalities = append(modalities, "Video")
+	}
+	if screen {
+		modalities = append(modalities, "ScreenSharer")
+	}
+	_, err := call.post(ctx, url, newUUIDv4(), true, map[string]any{"mediaNegotiation": map[string]any{
+		"callModalities": modalities,
+		"sender":         call.from,
+		"links":          cbLinks(call.callback, "call/", "mediaAnswer", "rejection"),
+		"mediaContent": map[string]any{
+			"blob": sdpOffer, "contentType": call.offerType, "requiredFeatures": "nonByPass",
+			"negotiationTag": call.participant + ";" + stream + "_1",
+			"applyChannelParameters": map[string]any{"multiChannelParameter": map[string]any{
+				"mids": []string{"*"}, "mediaParameter": `{"sendSideBWSeed":{"seedValueBitsPerSec":1500000}}`,
+			}},
+			"mediaLegId": call.mediaLegID,
+		},
+	}}, nil)
+	if err != nil {
+		return "", fmt.Errorf("renegotiate media: %w", err)
+	}
+	timeout := time.NewTimer(renegotiationWait)
+	defer timeout.Stop()
+	select {
+	case cb := <-call.answers:
+		return call.takeMediaAnswer(ctx, cb)
+	case <-timeout.C:
+		return "", fmt.Errorf("no answer to the media renegotiation within %s", renegotiationWait)
+	case <-call.ended:
+		return "", errors.New("the call ended")
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// takeMediaAnswer reads the other side's answer to a renegotiation and
+// acknowledges it, as the web client does.
+func (call *Call) takeMediaAnswer(ctx context.Context, cb callCallback) (string, error) {
+	call.c.log.Debug().Str("path", cb.path).RawJSON("body", cb.body).Msg("Teams answered a media renegotiation")
+	if strings.HasPrefix(cb.path, "call/rejection") {
+		return "", errors.New("the other side rejected the media renegotiation")
+	}
+	var p struct {
+		MediaAnswer struct {
+			MediaContent struct {
+				Blob string `json:"blob"`
+			} `json:"mediaContent"`
+			Links struct {
+				MediaAcknowledgement string `json:"mediaAcknowledgement"`
+			} `json:"links"`
+		} `json:"mediaAnswer"`
+	}
+	if err := json.Unmarshal(cb.body, &p); err != nil || p.MediaAnswer.MediaContent.Blob == "" {
+		return "", errors.New("the answer to the media renegotiation has no sdp")
+	}
+	if ack := p.MediaAnswer.Links.MediaAcknowledgement; ack != "" {
+		if _, err := call.post(ctx, ack, newUUIDv4(), true, nil, nil); err != nil {
+			call.c.log.Warn().Err(err).Msg("Failed to acknowledge the answer to a media renegotiation")
+		}
+	}
+	return p.MediaAnswer.MediaContent.Blob, nil
 }
 
 // videoMedia adds to media content what the web client sends with its video
@@ -906,7 +1022,7 @@ func (call *Call) Roster() []Participant {
 	var out []Participant
 	for mri, p := range call.roster.participants {
 		if p.inCall() {
-			out = append(out, p.participant(mri))
+			out = append(out, p.participant(mri, call.Direct()))
 		}
 	}
 	slices.SortFunc(out, func(a, b Participant) int { return strings.Compare(a.MRI, b.MRI) })
@@ -1090,11 +1206,16 @@ func (call *Call) repeatMuted(ctx context.Context) {
 // updateEndpointState expects the caller to hold stateLock.
 func (call *Call) updateEndpointState(ctx context.Context, muted bool) error {
 	call.stateSeq++
+	// Teams fails a direct call's update with the meeting's properties.
+	properties := map[string]any{"preheatProperties": 0}
+	if call.Direct() {
+		properties = map[string]any{"additionalEndpointProperties": map[string]any{"infoShownInReportMode": "FullInformation"}}
+	}
 	_, err := call.post(ctx, insertPath(call.controller, "/updateEndpointState"), newUUIDv4(), true, map[string]any{
 		"from": call.from,
 		"endpointState": map[string]any{
 			"endpointStateSequenceNumber": call.stateSeq,
-			"endpointProperties":          map[string]any{"preheatProperties": 0},
+			"endpointProperties":          properties,
 			"state":                       map[string]any{"isMuted": muted},
 		},
 	}, nil)
