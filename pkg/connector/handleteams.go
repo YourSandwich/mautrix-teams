@@ -372,15 +372,21 @@ func formatCallLogNotice(cl *msteams.CallLog) (string, string) {
 	return plain, htmlBody
 }
 
+// callVerb words a call log entry from the user's side: a call they placed
+// that went unanswered is no missed call of theirs.
 func callVerb(state string, outgoing bool) (icon, verb, prep string) {
-	switch strings.ToLower(state) {
-	case "ringing":
+	switch state = strings.ToLower(state); {
+	case state == "ringing":
 		return "📲", "Incoming call", "from"
-	case "missed":
+	case state == "missed" && outgoing:
+		return "📵", "No answer", "from"
+	case state == "missed":
 		return "📵", "Missed call", "from"
-	case "declined":
+	case state == "declined" && outgoing:
+		return "🚫", "Call declined", "by"
+	case state == "declined":
 		return "🚫", "Declined call", "from"
-	case "cancelled", "canceled":
+	case state == "cancelled", state == "canceled":
 		return "✖️", "Cancelled call", "to"
 	}
 	if outgoing {
