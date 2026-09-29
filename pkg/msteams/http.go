@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 type AuthKind int
@@ -48,14 +50,53 @@ func (c *Client) doJSONHeaders(ctx context.Context, method, url string, auth Aut
 	if err := c.ensureFreshTokens(ctx, bearer, skype); err != nil {
 		return nil, err
 	}
-	hdr, err := c.sendJSON(ctx, method, url, auth, body, out)
+	hdr, err := c.sendPaced(ctx, method, url, auth, body, out)
 	if errors.Is(err, ErrTokenExpired) && auth != AuthNone {
 		if rerr := c.reauth(ctx, auth); rerr != nil {
 			return nil, fmt.Errorf("reauth after 401: %w", rerr)
 		}
-		return c.sendJSON(ctx, method, url, auth, body, out)
+		return c.sendPaced(ctx, method, url, auth, body, out)
 	}
 	return hdr, err
+}
+
+// Teams answers 429 well inside its documented quotas, to message edits
+// too. It hasn't processed the request then, so it goes out again after the
+// wait Teams names, a few times at most, unless that wait is long.
+const (
+	rateLimitRetries = 3
+	maxRateLimitWait = 5 * time.Second
+)
+
+func (c *Client) sendPaced(ctx context.Context, method, url string, auth AuthKind, body, out any) (http.Header, error) {
+	hdr, err := c.sendJSON(ctx, method, url, auth, body, out)
+	for attempt := 0; attempt < rateLimitRetries && errors.Is(err, ErrRateLimited); attempt++ {
+		wait, ok := retryAfter(hdr)
+		if !ok {
+			break
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		hdr, err = c.sendJSON(ctx, method, url, auth, body, out)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return hdr, nil
+}
+
+// retryAfter reads a 429's Retry-After seconds, 1 s when absent; ok is false
+// for a wait too long to hold the request for.
+func retryAfter(hdr http.Header) (wait time.Duration, ok bool) {
+	seconds, err := strconv.Atoi(hdr.Get("Retry-After"))
+	if err != nil || seconds < 0 {
+		return time.Second, true
+	}
+	wait = time.Duration(seconds) * time.Second
+	return wait, wait <= maxRateLimitWait
 }
 
 func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind, body, out any) (http.Header, error) {
@@ -90,8 +131,8 @@ func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind
 		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 401")
 		return nil, ErrTokenExpired
 	case resp.StatusCode == http.StatusTooManyRequests:
-		c.log.Debug().Str("method", method).Str("url", url).Msg("Teams API: 429")
-		return nil, ErrRateLimited
+		c.log.Debug().Str("method", method).Str("url", url).Str("retry_after", resp.Header.Get("Retry-After")).Msg("Teams API: 429")
+		return resp.Header, ErrRateLimited
 	case resp.StatusCode == http.StatusForbidden:
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		c.log.Debug().Str("method", method).Str("url", url).Bytes("body", data).Msg("Teams API: 403")

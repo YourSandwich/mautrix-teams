@@ -18,11 +18,14 @@ package msteams
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -94,6 +97,7 @@ func TestDoJSONStatusMapping(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "0")
 				w.WriteHeader(tc.status)
 			}))
 			t.Cleanup(srv.Close)
@@ -149,5 +153,33 @@ func TestDoJSONEmptyBody(t *testing.T) {
 			t.Errorf("empty %d body: err = %v, want error %v", status, err, wantErr)
 		}
 		srv.Close()
+	}
+}
+
+// An edit Teams rate-limits goes out again after the wait it names.
+func TestRateLimitedRequestIsRetried(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	t.Cleanup(srv.Close)
+	var out struct{ OK bool }
+	if err := newTestClient(t).doJSON(context.Background(), http.MethodPut, srv.URL, AuthNone, map[string]string{"content": "edited"}, &out); err != nil || !out.OK {
+		t.Fatalf("err %v, out %+v", err, out)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("%d requests, want 2", n)
+	}
+	if wait, ok := retryAfter(http.Header{}); wait != time.Second || !ok {
+		t.Error("no Retry-After should wait a second")
+	}
+	if _, ok := retryAfter(http.Header{"Retry-After": {"60"}}); ok {
+		t.Error("a minute's Retry-After should give up")
 	}
 }

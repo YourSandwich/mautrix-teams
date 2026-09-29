@@ -141,3 +141,22 @@ func TestRenderConversationMentions(t *testing.T) {
 		db.Close()
 	}
 }
+
+func TestCallLogNoticeSide(t *testing.T) {
+	for _, tc := range []struct {
+		direction, state, want string
+	}{
+		{"outgoing", "missed", "📵 No answer from Bob Example"},
+		{"incoming", "missed", "📵 Missed call from Bob Example"},
+		{"outgoing", "declined", "🚫 Call declined by Bob Example"},
+		{"incoming", "declined", "🚫 Declined call from Bob Example"},
+	} {
+		cl := &msteams.CallLog{Direction: tc.direction, State: tc.state, OriginatorName: "Alice Example", TargetName: "Bob Example"}
+		if tc.direction == "incoming" {
+			cl.OriginatorName, cl.TargetName = "Bob Example", "Alice Example"
+		}
+		if plain, _ := formatCallLogNotice(cl); plain != tc.want {
+			t.Errorf("%s %s: %q, want %q", tc.direction, tc.state, plain, tc.want)
+		}
+	}
+}
