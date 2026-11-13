@@ -16,11 +16,11 @@
 package teamsmedia
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -32,6 +32,8 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media/h264reader"
 	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
+
+	"go.mau.fi/mautrix-teams/pkg/teamsvideo"
 )
 
 // VideoLimits is what Teams takes from a sender, as the format parameters of
@@ -43,6 +45,9 @@ type VideoLimits struct {
 	MaxBitrate   int
 }
 
+// H.264 level 5.2, constrained baseline (ITU-T H.264, table A-1), for 3840x2160 at MaxFPS.
+const maxBitrate = 240000
+
 // ParseVideoLimits reads max-fs, max-fps (hundredths of a frame, as Teams
 // writes it) and max-br from H.264 format parameters.
 func ParseVideoLimits(params string) VideoLimits {
@@ -50,53 +55,66 @@ func ParseVideoLimits(params string) VideoLimits {
 	for _, param := range strings.Split(params, ";") {
 		key, value, _ := strings.Cut(strings.TrimSpace(param), "=")
 		n, err := strconv.ParseFloat(value, 64)
-		if err != nil {
+		// NaN fails both comparisons; the bound keeps the products of a limit within an int.
+		if err != nil || !(n > 0 && n <= math.MaxInt32) {
 			continue
 		}
 		switch key {
 		case "max-fs":
 			l.MaxFrameSize = int(n)
 		case "max-fps":
-			l.MaxFPS = n / 100
+			l.MaxFPS = min(n/100, teamsvideo.MaxFPS)
 		case "max-br":
-			l.MaxBitrate = int(n)
+			l.MaxBitrate = int(min(n, maxBitrate))
 		}
 	}
 	return l
 }
 
+// Each IDR blurs a still screen for seconds: against one every 10 s, a minute raised the
+// mean SSIM of still shares from 3 to 25 s by 0.026 (25 of 28 cases better, none worse).
+const keyFrameSafety = 60
+
 // Teams takes H.264 only, while Element Call sends VP8 or VP9 by default.
 func transcoderArgs(l VideoLimits, mirror bool) []string {
+	rate := 30.0
+	if l.MaxFPS > 0 {
+		rate = l.MaxFPS
+	}
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		// The IVF header names the codec, so skip probing; "-fflags nobuffer"
 		// breaks ffmpeg's VP8 decoding.
 		"-probesize", "32", "-analyzeduration", "0",
+		// Frame threads hold every frame back by one frame per thread.
+		"-threads", "1",
 		"-f", "ivf", "-i", "pipe:0",
 		"-an", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
 		"-profile:v", "baseline", "-pix_fmt", "yuv420p", "-bf", "0",
-		// No way to ask the encoder for a keyframe on demand, so send one often.
-		"-g", "60", "-force_key_frames", "expr:gte(t,n_forced*2)",
+		// Keyframes come from the sender on request; one on a timer would blur a still screen.
+		"-force_key_frames", "source", "-g", strconv.FormatFloat(math.Ceil(keyFrameSafety*rate), 'f', 0, 64),
 		"-x264-params", "aud=1:repeat-headers=1",
 	}
-	var filters []string
+	// H.264 in 4:2:0 takes even sides only; cropping an odd line keeps the picture unscaled.
+	filters := []string{"crop=w='trunc(iw/2)*2':h='trunc(ih/2)*2'"}
 	if mirror {
 		filters = append(filters, "hflip")
 	}
 	if l.MaxFrameSize > 0 {
-		// Shrinks the frame into the macroblock budget, keeping its aspect.
+		fits := fmt.Sprintf("lte(ceil(iw/16)*ceil(ih/16),%d)", l.MaxFrameSize)
 		fit := fmt.Sprintf("min(1,sqrt(%d/(iw*ih)))", l.MaxFrameSize*256)
-		filters = append(filters, fmt.Sprintf("scale=w='trunc(iw*%[1]s/16)*16':h='trunc(ih*%[1]s/16)*16'", fit))
+		filters = append(filters, fmt.Sprintf("scale=w='if(%[1]s,iw,trunc(iw*%[2]s/16)*16)':h='if(%[1]s,ih,trunc(ih*%[2]s/16)*16)'", fits, fit))
 	}
+	args = append(args, "-vf", strings.Join(filters, ","))
 	if l.MaxFPS > 0 {
-		filters = append(filters, fmt.Sprintf("fps=%g", l.MaxFPS))
-	}
-	if len(filters) > 0 {
-		args = append(args, "-vf", strings.Join(filters, ","))
+		// Not the fps filter: it repeats a keyframe's mark onto its copies, making each an IDR.
+		args = append(args, "-r", fmt.Sprintf("%g", l.MaxFPS), "-fps_mode", "cfr")
+	} else {
+		args = append(args, "-fps_mode", "passthrough")
 	}
 	if l.MaxBitrate > 0 {
-		rate := strconv.Itoa(l.MaxBitrate) + "k"
-		args = append(args, "-b:v", rate, "-maxrate", rate, "-bufsize", rate)
+		bitrate := strconv.Itoa(l.MaxBitrate) + "k"
+		args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate)
 	}
 	return append(args, "-f", "h264", "pipe:1")
 }
@@ -115,7 +133,22 @@ type Transcoder struct {
 	packetizer rtp.Packetizer
 	unit       []byte
 	lastUnit   time.Time
+	isKeyFrame func([]byte) bool
+	started    bool
+	// The 32-bit RTP clock wraps every 13 h and ffmpeg drops frames after a step back,
+	// so frames go out on a running clock from 0.
+	lastTimestamp uint32
+	timestamp     int64
 }
+
+// 3.3 times the largest keyframe measured for a share (1235 packets at 3840x2160, dense
+// text at Element Call's 10 Mbit/s); the sample builder never lets out a larger frame.
+const maxFramePackets = 4096
+
+// A larger step is a pause or a restarted clock: ffmpeg would fill a pause with a burst
+// of copies, or drop frames after a step back, so it counts as one frame. A browser
+// repeats a still screen every second (libwebrtc's kZeroHertzIdleRepeatRatePeriod).
+const maxTimestampStep = 2 * 90000
 
 // NewTranscoder starts ffmpeg for video of the given MIME type
 // (webrtc.MimeTypeVP8 or webrtc.MimeTypeVP9), within the limits, and
@@ -127,18 +160,20 @@ func NewTranscoder(ctx context.Context, mimeType string, limits VideoLimits, mir
 	}
 	var depacketizer rtp.Depacketizer
 	var fourcc string
+	var isKeyFrame func([]byte) bool
 	switch strings.ToLower(mimeType) {
 	case strings.ToLower(webrtc.MimeTypeVP8):
-		depacketizer, fourcc = &codecs.VP8Packet{}, "VP80"
+		depacketizer, fourcc, isKeyFrame = &codecs.VP8Packet{}, "VP80", vp8KeyFrame
 	case strings.ToLower(webrtc.MimeTypeVP9):
-		depacketizer, fourcc = &codecs.VP9Packet{}, "VP90"
+		depacketizer, fourcc, isKeyFrame = &codecs.VP9Packet{}, "VP90", vp9KeyFrame
 	default:
 		return nil, fmt.Errorf("can't transcode %s", mimeType)
 	}
 	t := &Transcoder{
 		cmd:        exec.CommandContext(ctx, path, transcoderArgs(limits, mirror)...),
-		frames:     samplebuilder.New(512, depacketizer, 90000, samplebuilder.WithMaxTimeDelay(300*time.Millisecond)),
+		frames:     samplebuilder.New(maxFramePackets, depacketizer, 90000, samplebuilder.WithMaxTimeDelay(300*time.Millisecond)),
 		packetizer: rtp.NewPacketizer(1200, 0, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), 90000),
+		isKeyFrame: isKeyFrame,
 	}
 	t.cmd.Stderr = &t.stderr
 	if t.in, err = t.cmd.StdinPipe(); err != nil {
@@ -174,19 +209,46 @@ func ivfHeader(fourcc string) []byte {
 	return h
 }
 
-// WriteRTP feeds one packet of the source video. It reports whether packets
-// were lost on the way, after which the source should send a keyframe.
-func (t *Transcoder) WriteRTP(pkt *rtp.Packet) (lost bool, err error) {
+// WriteRTP feeds one packet of the source video; needKeyFrame asks the source to send a keyframe.
+func (t *Transcoder) WriteRTP(pkt *rtp.Packet) (needKeyFrame bool, err error) {
 	t.frames.Push(pkt)
 	for frame := t.frames.Pop(); frame != nil; frame = t.frames.Pop() {
-		lost = lost || frame.PrevDroppedPackets > 0
+		needKeyFrame = needKeyFrame || frame.PrevDroppedPackets > 0
+		if t.started {
+			step := int64(int32(frame.PacketTimestamp - t.lastTimestamp))
+			if step > maxTimestampStep || step < -maxTimestampStep {
+				step = 90000 / teamsvideo.MaxFPS
+			}
+			t.timestamp += step
+		} else if !t.isKeyFrame(frame.Data) {
+			continue
+		}
+		t.started = true
+		t.lastTimestamp = frame.PacketTimestamp
 		binary.LittleEndian.PutUint32(t.frameHead[0:], uint32(len(frame.Data)))
-		binary.LittleEndian.PutUint64(t.frameHead[4:], uint64(frame.PacketTimestamp))
+		binary.LittleEndian.PutUint64(t.frameHead[4:], uint64(t.timestamp))
 		if _, err := t.in.Write(append(t.frameHead[:], frame.Data...)); err != nil {
-			return lost, err
+			return needKeyFrame, err
 		}
 	}
-	return lost, nil
+	return needKeyFrame || !t.started, nil
+}
+
+// RFC 6386, section 9.1: the frame tag, then a keyframe's start code and size.
+func vp8KeyFrame(frame []byte) bool {
+	return len(frame) >= 10 && frame[0]&1 == 0 && frame[3] == 0x9d && frame[4] == 0x01 && frame[5] == 0x2a
+}
+
+// VP9 bitstream specification, section 6.2; profile 3 adds a reserved bit.
+func vp9KeyFrame(frame []byte) bool {
+	if len(frame) == 0 || frame[0]>>6 != 2 {
+		return false
+	}
+	showExisting := 3
+	if frame[0]>>4&3 == 3 {
+		showExisting = 2
+	}
+	return frame[0]>>showExisting&1 == 0 && frame[0]>>(showExisting-1)&1 == 0
 }
 
 // ReadPackets returns the RTP packets of the next encoded frame, timed by
@@ -218,23 +280,27 @@ func (t *Transcoder) ReadPackets() ([]*rtp.Packet, error) {
 	}
 }
 
-// lockedBuffer keeps ffmpeg's error output, which exec copies in from its own
-// goroutine.
 type lockedBuffer struct {
 	lock sync.Mutex
-	buf  bytes.Buffer
+	buf  []byte
 }
+
+const stderrKept = 4 << 10
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
-	return b.buf.Write(p)
+	b.buf = append(b.buf, p...)
+	if extra := len(b.buf) - stderrKept; extra > 0 {
+		b.buf = b.buf[extra:]
+	}
+	return len(p), nil
 }
 
 func (b *lockedBuffer) String() string {
 	b.lock.Lock()
 	defer b.lock.Unlock()
-	return strings.TrimSpace(b.buf.String())
+	return strings.TrimSpace(string(b.buf))
 }
 
 func (t *Transcoder) Close() error {

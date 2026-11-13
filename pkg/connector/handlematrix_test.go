@@ -20,17 +20,25 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/dbutil"
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
+	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
+	"go.mau.fi/mautrix-teams/pkg/teamsid"
 )
 
 func TestCaptionToTeams(t *testing.T) {
@@ -173,5 +181,87 @@ func TestMatrixChangesSwitchedOff(t *testing.T) {
 	rename.Portal = portal
 	if _, err := tc.HandleMatrixRoomName(context.Background(), rename); !errors.Is(err, bridgev2.ErrRoomMetadataNotSupported) {
 		t.Errorf("rename: %v", err)
+	}
+}
+
+func TestReactionToBridgedReaction(t *testing.T) {
+	const (
+		chat   = "19:0123456789abcdef0123456789abcdef@thread.v2"
+		person = "8:orgid:00000000-0000-0000-0000-00000000000a"
+		custom = "thankyou;0-weu-d1-0123456789abcdef0123456789abcdef"
+	)
+	ctx := context.Background()
+	db, err := dbutil.NewWithDialect("file:"+filepath.Join(t.TempDir(), "bridge.db")+"?_txlock=immediate", "sqlite3-fk-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	tc := &TeamsConnector{}
+	br := bridgev2.NewBridge("msteams", db, zerolog.Nop(), &bridgeconfig.BridgeConfig{}, fakeMatrix{}, tc, commands.NewProcessor)
+	br.BackgroundCtx = ctx
+	if err = br.DB.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	portal := &database.Portal{PortalKey: teamsid.MakePortalKey(chat, "login", false), MXID: "!chat:example.com", Metadata: &PortalMetadata{}}
+	if err = br.DB.Portal.Insert(ctx, portal); err != nil {
+		t.Fatal(err)
+	}
+	reactors := []networkid.UserID{teamsid.MakeUserID(person), teamsid.MakeUserID("8:orgid:00000000-0000-0000-0000-00000000000c")}
+	for _, reactor := range reactors {
+		if err = br.DB.Ghost.Insert(ctx, &database.Ghost{ID: reactor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := &TeamsClient{Main: tc, UserMRI: "8:orgid:00000000-0000-0000-0000-00000000000b"}
+	react := func(target *database.Message, key string) (networkid.EmojiID, error) {
+		resp, err := client.PreHandleMatrixReaction(ctx, &bridgev2.MatrixReaction{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.ReactionEventContent]{
+				Content: &event.ReactionEventContent{RelatesTo: event.RelatesTo{Type: event.RelAnnotation, EventID: target.MXID, Key: key}},
+				Portal:  &bridgev2.Portal{Portal: portal},
+			},
+			TargetMessage: target,
+		})
+		return resp.EmojiID, err
+	}
+	shown := func(key string) string { return variationselector.Add(msteams.DecodeReactionKey(key)) }
+	var target *database.Message
+	for i, c := range []struct {
+		name   string
+		stored []string
+		click  string
+		want   string
+	}{
+		{"an organisation's emoji", []string{custom}, shown(custom), custom},
+		{"a glyph the catalog keys otherwise", []string{"2603_snowman"}, shown("2603_snowman"), "2603_snowman"},
+		{"the catalog's key", []string{"like"}, shown("like"), "like"},
+		{"a stored glyph with its variation selector", []string{"rainbowheart2"}, "❤", "rainbowheart2"},
+		{"the catalog's key before a smaller one", []string{"cactuslove", "heart"}, "❤️", "heart"},
+		{"the smallest key, not the first row", []string{"rainbowheart2", "cactuslove"}, "❤️", "cactuslove"},
+		{"a Teams emoji before text Teams kept", []string{":thankyou:", custom}, ":thankyou:", custom},
+		{"an acknowledgement is no reaction", []string{msteams.AcknowledgementKey}, "✅", "2705_whiteheavycheckmark"},
+		{"the catalog on no reaction", nil, "❤️", "heart"},
+		{"text on no reaction", nil, ":nothing:", ":nothing:"},
+	} {
+		target = &database.Message{ID: teamsid.MakeMessageID(chat, strconv.Itoa(i+1)), MXID: id.EventID("$message" + strconv.Itoa(i+1)),
+			Room: portal.PortalKey, SenderID: teamsid.MakeUserID(person), Timestamp: time.UnixMilli(1)}
+		if err = br.DB.Message.Insert(ctx, target); err != nil {
+			t.Fatal(err)
+		}
+		for j, key := range c.stored {
+			reaction := &database.Reaction{Room: portal.PortalKey, MessageID: target.ID, SenderID: reactors[j],
+				EmojiID: networkid.EmojiID(key), MXID: id.EventID("$" + key + strconv.Itoa(i)), Timestamp: time.UnixMilli(2)}
+			if err = br.DB.Reaction.Upsert(ctx, reaction); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, err := react(target, c.click); err != nil || got != networkid.EmojiID(c.want) {
+			t.Errorf("%s: adding %q sends %q (err %v), want %q", c.name, c.click, got, err, c.want)
+		}
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := react(target, "❤️"); err == nil {
+		t.Errorf("with the database gone, adding a reaction sends %q, want an error", got)
 	}
 }

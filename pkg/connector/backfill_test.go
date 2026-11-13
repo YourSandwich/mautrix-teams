@@ -20,7 +20,9 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 
+	"go.mau.fi/mautrix-teams/pkg/msteams"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
 )
 
@@ -59,5 +61,13 @@ func TestAlreadyBridged(t *testing.T) {
 		if got := alreadyBridged(tt.id, tt.newest); got != tt.want {
 			t.Errorf("alreadyBridged(%q, %d) = %v, want %v", tt.id, tt.newest, got, tt.want)
 		}
+	}
+}
+
+func TestBackfillShowsCustomEmoji(t *testing.T) {
+	const custom = "thankyou;0-weu-d1-0123456789abcdef0123456789abcdef"
+	got := backfillReactionsFor(&msteams.Message{Reactions: []msteams.Reaction{{Type: custom, UserID: "8:orgid:00000000-0000-0000-0000-00000000000a"}}})
+	if len(got) != 1 || got[0].Emoji != ":thankyou:" || got[0].EmojiID != networkid.EmojiID(custom) {
+		t.Errorf("backfilled reactions = %+v", got)
 	}
 }

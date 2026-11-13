@@ -168,13 +168,19 @@ func (c *Client) SnapshotTokens() (auth, skype *Token) {
 	return
 }
 
-// refreshOAuthToken runs the FOCI refresh-token grant for the given scope and
-// returns the decoded response. It leaves the cached token slots untouched;
-// the caller decides which slot to fill.
+const maxRefusedSharePoint = 64
+
 func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride string) (*oauthTokenResponse, error) {
+	return c.refreshScope(ctx, scope, tenantOverride, false)
+}
+
+func (c *Client) refreshScope(ctx context.Context, scope, tenantOverride string, sharePoint bool) (*oauthTokenResponse, error) {
 	c.tokenLock.RLock()
-	refresh := c.refresh
+	refresh, scopeRefused := c.refresh, c.refusedScopes[scope] || c.refusedSharePoint[scope]
 	c.tokenLock.RUnlock()
+	if c.refused.Load() || scopeRefused {
+		return nil, ErrTokenInvalid
+	}
 	if refresh == "" {
 		return nil, ErrUnauthorized
 	}
@@ -212,11 +218,32 @@ func (c *Client) refreshOAuthToken(ctx context.Context, scope, tenantOverride st
 	}
 	if resp.StatusCode >= 400 || out.Error != "" {
 		if out.Error == "invalid_grant" {
+			c.tokenLock.Lock()
+			switch {
+			case !sharePoint:
+				c.refusedScopes[scope] = true
+			case len(c.refusedSharePoint) < maxRefusedSharePoint:
+				c.refusedSharePoint[scope] = true
+				if len(c.refusedSharePoint) == maxRefusedSharePoint {
+					c.log.Warn().Int("scopes", maxRefusedSharePoint).Msg("Remembered as many refused SharePoint scopes as are kept; later ones are asked for on each use")
+				}
+			}
+			c.tokenLock.Unlock()
 			return nil, ErrTokenInvalid
 		}
 		return nil, fmt.Errorf("token endpoint: %s: %s", out.Error, out.ErrorDesc)
 	}
 	return &out, nil
+}
+
+// AAD refusing the login's own scope refuses the refresh token; a refusal of another
+// scope may concern that resource alone (consent, conditional access).
+func (c *Client) refreshLoginToken(ctx context.Context, scope, tenantOverride string) (*oauthTokenResponse, error) {
+	out, err := c.refreshOAuthToken(ctx, scope, tenantOverride)
+	if errors.Is(err, ErrTokenInvalid) {
+		c.refuseCredentials(err)
+	}
+	return out, err
 }
 
 func (c *Client) storeOAuthToken(slot **Token, out *oauthTokenResponse) {
@@ -238,7 +265,7 @@ func (c *Client) RefreshAuthToken(ctx context.Context) error {
 	if c.cfg.Personal {
 		scope = personalOAuthScope
 	}
-	out, err := c.refreshOAuthToken(ctx, scope, tenantOverride)
+	out, err := c.refreshLoginToken(ctx, scope, tenantOverride)
 	if err != nil {
 		return err
 	}
@@ -357,7 +384,7 @@ func (c *Client) RefreshSharePointToken(ctx context.Context, host string) error 
 		return fmt.Errorf("empty sharepoint host")
 	}
 	scope := "https://" + host + "/.default offline_access"
-	out, err := c.refreshOAuthToken(ctx, scope, "")
+	out, err := c.refreshScope(ctx, scope, "", true)
 	if err != nil {
 		return err
 	}
@@ -381,7 +408,7 @@ func (c *Client) RefreshSharePointToken(ctx context.Context, host string) error 
 // reactively on 401 (Azure can revoke a bearer before its stored expiry).
 func (c *Client) RefreshSkypeToken(ctx context.Context) error {
 	if c.cfg.Personal {
-		out, err := c.refreshOAuthToken(ctx, personalSkypeTokenScope, "")
+		out, err := c.refreshLoginToken(ctx, personalSkypeTokenScope, "")
 		if err != nil {
 			return fmt.Errorf("refresh authz bearer: %w", err)
 		}

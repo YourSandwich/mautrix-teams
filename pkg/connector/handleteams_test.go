@@ -160,3 +160,18 @@ func TestCallLogNoticeSide(t *testing.T) {
 		}
 	}
 }
+
+func TestReactionSyncShowsCustomEmoji(t *testing.T) {
+	const custom = "thankyou;0-weu-d1-0123456789abcdef0123456789abcdef"
+	client := &TeamsClient{
+		Main:      &TeamsConnector{br: &bridgev2.Bridge{Config: &bridgeconfig.BridgeConfig{}}},
+		UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "login"}},
+	}
+	sync := client.reactionSync(msteams.Event{ThreadID: "19:chat@thread.v2", Message: &msteams.Message{ID: "1", Reactions: []msteams.Reaction{
+		{Type: custom, UserID: "8:orgid:00000000-0000-0000-0000-00000000000a"},
+	}}})
+	user := sync.Reactions.Users[teamsid.MakeUserID("8:orgid:00000000-0000-0000-0000-00000000000a")]
+	if user == nil || len(user.Reactions) != 1 || user.Reactions[0].Emoji != ":thankyou:" || user.Reactions[0].EmojiID != custom {
+		t.Errorf("synced reactions = %+v", user)
+	}
+}

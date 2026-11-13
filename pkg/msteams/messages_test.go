@@ -16,17 +16,20 @@
 package msteams
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +113,33 @@ func TestSendMessagePlainText(t *testing.T) {
 	}
 	if captured.ClientMessageID == "" {
 		t.Error("client message id not auto-generated")
+	}
+}
+
+func TestSendMessageFileCardAloneSendsEmptyContent(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("body decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newClientAt(t, srv.URL)
+	_, err := c.SendMessage(context.Background(), "19:thread@thread.v2", "", SendOptions{
+		ContentType: "html",
+		Files:       []ChatFile{{Name: "a.zip", UniqueID: "00000000-0000-4000-8000-0000000000e1"}},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if content, ok := body["content"]; !ok || content != "" {
+		t.Errorf("content = %#v (present %v), want an empty string as the web client sends", content, ok)
+	}
+	if props, _ := body["properties"].(map[string]any); props["files"] == nil {
+		t.Errorf("properties = %v, want the file card", body["properties"])
 	}
 }
 
@@ -326,6 +356,9 @@ func TestDecodeReactionKey(t *testing.T) {
 		"manliftingweights-tone3": "🏋🏽‍♂️",
 		"yes-tone6":               "yes-tone6",
 		"acks":                    "✅",
+		"thankyou;0-weu-d1-0123456789abcdef0123456789abcdef": ":thankyou:",
+		"bad_idea;0-weu-d1-0123456789abcdef0123456789abcdef": ":bad_idea:",
+		";0-weu-d1-0123456789abcdef0123456789abcdef":         ";0-weu-d1-0123456789abcdef0123456789abcdef",
 	} {
 		if got := DecodeReactionKey(key); got != want {
 			t.Errorf("DecodeReactionKey(%q) = %q, want %q", key, got, want)
@@ -586,6 +619,106 @@ func TestFetchSharedFileFallsBackToGraph(t *testing.T) {
 	}
 }
 
+func TestFetchSharedFileRefusesAPageForTheFile(t *testing.T) {
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	t.Cleanup(tokens.Close)
+	const page = "text/html; charset=utf-8"
+	for _, tc := range []struct {
+		name, file, sharePoint, graph string
+		want                          string
+		graphAsked                    bool
+	}{
+		{"sign-in page, then the file from graph", "report.pdf", page, "application/pdf", "graph", true},
+		{"a page from both", "report.pdf", page, page, "", true},
+		{"a web page that is the file", "Notes.HTML", page, "", "sharepoint", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			graphAsked := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/_layouts/15/download.aspx") {
+					w.Header().Set("Content-Type", tc.sharePoint)
+					_, _ = w.Write([]byte("sharepoint"))
+					return
+				}
+				graphAsked = true
+				w.Header().Set("Content-Type", tc.graph)
+				_, _ = w.Write([]byte("graph"))
+			}))
+			t.Cleanup(srv.Close)
+			c, err := NewClient(ClientConfig{UserMRI: "8:orgid:me", TenantID: "tenant", RefreshToken: "rt", Logger: zerolog.Nop()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			c.tokenEndpointForTest, c.graphURLForTest = tokens.URL, srv.URL
+
+			data, _, err := c.FetchSharedFile(context.Background(), SharedFile{
+				Name:     tc.file,
+				ItemID:   "00000000-0000-0000-0000-0000000000f1",
+				SiteURL:  srv.URL + "/personal/bob/",
+				ShareURL: "https://contoso-my.sharepoint.com/:b:/g/personal/bob/EabcXYZ",
+			})
+			if tc.want == "" {
+				if !errors.Is(err, ErrPageNotFile) {
+					t.Errorf("got %q, %v; want ErrPageNotFile", data, err)
+				}
+			} else if err != nil || string(data) != tc.want {
+				t.Errorf("got %q, %v; want %q", data, err, tc.want)
+			}
+			if graphAsked != tc.graphAsked {
+				t.Errorf("graph asked: %v, want %v", graphAsked, tc.graphAsked)
+			}
+		})
+	}
+}
+
+func TestDownloadsRefuseOversizedAndCutBodies(t *testing.T) {
+	const limit = 16
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/whole":
+			_, _ = w.Write([]byte(strings.Repeat("a", limit)))
+		case "/over":
+			_, _ = w.Write([]byte(strings.Repeat("a", limit+1)))
+		case "/cut":
+			w.Header().Set("Content-Length", strconv.Itoa(limit))
+			_, _ = w.Write([]byte("a"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := newAMSClient(t, srv.URL)
+	for _, reader := range []struct {
+		name string
+		read func(u string) ([]byte, error)
+	}{
+		{"fetchAMS", func(u string) ([]byte, error) {
+			data, _, err := c.fetchAMS(context.Background(), u, "skype-value", limit)
+			return data, err
+		}},
+		{"readDownload", func(u string) ([]byte, error) {
+			resp, err := srv.Client().Get(u)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			data, _, err := readDownload(resp, "test", limit)
+			return data, err
+		}},
+	} {
+		if data, err := reader.read(srv.URL + "/whole"); err != nil || len(data) != limit {
+			t.Errorf("%s: a body of the limit gave %d bytes, %v; want all of it", reader.name, len(data), err)
+		}
+		if data, err := reader.read(srv.URL + "/over"); !errors.Is(err, ErrTooLarge) {
+			t.Errorf("%s: a body over the limit gave %d bytes, %v; want ErrTooLarge", reader.name, len(data), err)
+		}
+		if data, err := reader.read(srv.URL + "/cut"); err == nil || errors.Is(err, ErrTooLarge) {
+			t.Errorf("%s: a cut body gave %d bytes, %v; want a read error", reader.name, len(data), err)
+		}
+	}
+}
+
 func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
 	giphy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "" {
@@ -605,11 +738,187 @@ func TestFetchAttachmentKeepsTokenFromThirdParties(t *testing.T) {
 		"https://media.giphy.com/media/x/giphy.gif":                             false,
 		"https://evil.example/asyncgw.teams.microsoft.com/x":                    false,
 		"http://eu-prod.asyncgw.teams.microsoft.com/v1/objects/0-x":             false,
+		"http://at-prod.asyncgw.teams.microsoft.com/v1/objects/0-x":             false,
 	} {
 		u, _ := url.Parse(raw)
 		if got := c.isAMSHost(u); got != want {
 			t.Errorf("isAMSHost(%s) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestFetchAttachmentSendsTokenToTheBaseHostOnlyOverItsScheme(t *testing.T) {
+	seen := func(got *string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*got = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("img"))
+		})
+	}
+	var overTLS, overHTTP string
+	base := httptest.NewTLSServer(seen(&overTLS))
+	t.Cleanup(base.Close)
+	plain := httptest.NewServer(seen(&overHTTP))
+	t.Cleanup(plain.Close)
+	c := newAMSClient(t, base.URL)
+	c.http = base.Client()
+
+	for _, u := range []string{base.URL, plain.URL} {
+		if data, _, err := c.FetchAttachment(context.Background(), u+"/v1/objects/0-x/views/imgo"); err != nil || string(data) != "img" {
+			t.Fatalf("%s: got %q, %v", u, data, err)
+		}
+	}
+	if overTLS != "skype_token skype-fresh" {
+		t.Errorf("base host over https got Authorization %q, want the skype token", overTLS)
+	}
+	if overHTTP != "" {
+		t.Errorf("base host over http got Authorization %q, want none", overHTTP)
+	}
+}
+
+func TestFetchAttachmentRefusesARedirectToHTTP(t *testing.T) {
+	var overHTTP []string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		overHTTP = append(overHTTP, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte("img"))
+	}))
+	t.Cleanup(plain.Close)
+	base := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(base.Close)
+	c := newAMSClient(t, base.URL)
+	c.http.Transport = base.Client().Transport
+
+	if _, _, err := c.FetchAttachment(context.Background(), base.URL+"/v1/objects/0-x/views/imgo"); !errors.Is(err, ErrHTTPRedirect) {
+		t.Errorf("redirect to http: %v, want ErrHTTPRedirect", err)
+	}
+	if len(overHTTP) != 0 {
+		t.Errorf("the http side got %d requests, Authorization %q; want none", len(overHTTP), overHTTP)
+	}
+}
+
+func TestRedirectToHTTPErrorNamesSchemeAndHostAlone(t *testing.T) {
+	c := newTestClient(t)
+	from := httptest.NewRequest(http.MethodGet, "https://ams.example.invalid/v1/objects/0-x", nil)
+	to := httptest.NewRequest(http.MethodGet, "http://ams.example.invalid:8080/v1/objects/0-x?sig=example-signature", nil)
+	err := c.checkRedirect(to, []*http.Request{from})
+	if want := ErrHTTPRedirect.Error() + ": to http://ams.example.invalid:8080"; !errors.Is(err, ErrHTTPRedirect) || err.Error() != want {
+		t.Errorf("redirect to http: %v, want %q", err, want)
+	}
+}
+
+func TestRedirectsStopAfterTenRequests(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests++; requests > 20 {
+			_, _ = w.Write([]byte("img"))
+			return
+		}
+		http.Redirect(w, r, "/again/"+strconv.Itoa(requests), http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	c := newAMSClient(t, srv.URL)
+	if _, _, err := c.FetchAttachment(context.Background(), srv.URL+"/v1/objects/0-x/views/imgo"); !errors.Is(err, ErrRedirectLoop) {
+		t.Errorf("endless redirects: %v, want ErrRedirectLoop", err)
+	}
+	if requests != 10 {
+		t.Errorf("%d requests, want 10", requests)
+	}
+}
+
+func loggingClient(t *testing.T) (*Client, *bytes.Buffer) {
+	t.Helper()
+	logged := new(bytes.Buffer)
+	c, err := NewClient(ClientConfig{UserMRI: "8:orgid:test", Logger: zerolog.New(logged)})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c, logged
+}
+
+type logLine struct {
+	Message string `json:"message"`
+	From    string `json:"from_host"`
+	To      string `json:"to_host"`
+	By      string `json:"by"`
+}
+
+func logLines(t *testing.T, logged *bytes.Buffer) []logLine {
+	t.Helper()
+	var lines []logLine
+	for raw := range strings.Lines(logged.String()) {
+		var line logLine
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func TestRedirectToAnotherHostIsLoggedOncePerPair(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if to, ok := strings.CutPrefix(r.URL.Path, "/to/"); ok {
+			http.Redirect(w, r, "http://"+to+"/done", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("img"))
+	}))
+	t.Cleanup(srv.Close)
+	c, logged := loggingClient(t)
+	c.http.Transport = &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}}
+	for _, u := range []string{
+		"http://a.example.invalid/to/b.example.invalid",
+		"http://a.example.invalid/to/b.example.invalid",
+		"http://c.example.invalid/to/b.example.invalid",
+		"http://a.example.invalid/to/a.example.invalid",
+		"http://A.example.invalid/to/a.example.invalid",
+	} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", u, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || string(body) != "img" {
+			t.Errorf("%s: got %q, %v; want the redirect followed", u, body, err)
+		}
+	}
+	var pairs [][2]string
+	for _, line := range logLines(t, logged) {
+		pairs = append(pairs, [2]string{line.From, line.To})
+	}
+	if want := [][2]string{{"a.example.invalid", "b.example.invalid"}, {"c.example.invalid", "b.example.invalid"}}; !slices.Equal(pairs, want) {
+		t.Errorf("logged %v, want %v", pairs, want)
+	}
+	if strings.Contains(logged.String(), "/done") || strings.Contains(logged.String(), "/to/") {
+		t.Errorf("a path reached the log: %s", logged)
+	}
+}
+
+func TestRedirectPairsLoggedStopAtTheirCap(t *testing.T) {
+	c, logged := loggingClient(t)
+	for i := range maxRedirectPairs + 6 {
+		c.noteRedirect(fmt.Sprintf("h%d.example.invalid", i), "b.example.invalid")
+	}
+	pairs, full := 0, 0
+	for _, line := range logLines(t, logged) {
+		switch {
+		case line.To != "":
+			pairs++
+		case strings.Contains(line.Message, "logging no more"):
+			full++
+		}
+	}
+	if pairs != maxRedirectPairs || full != 1 {
+		t.Errorf("%d pairs and %d lines about the cap logged, want %d and 1", pairs, full, maxRedirectPairs)
 	}
 }
 

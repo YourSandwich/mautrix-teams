@@ -88,8 +88,14 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 }
 
 func (t *TeamsClient) queueReactionSync(ev msteams.Event) {
+	if sync := t.reactionSync(ev); sync != nil {
+		t.Main.br.QueueRemoteEvent(t.UserLogin, sync)
+	}
+}
+
+func (t *TeamsClient) reactionSync(ev msteams.Event) *simplevent.ReactionSync {
 	if ev.Message == nil || ev.ThreadID == "" || ev.Message.ID == "" {
-		return
+		return nil
 	}
 	targetID := teamsid.MakeMessageID(ev.ThreadID, ev.Message.ID)
 	users := map[networkid.UserID]*bridgev2.ReactionSyncUser{}
@@ -115,14 +121,14 @@ func (t *TeamsClient) queueReactionSync(ev msteams.Event) {
 			Emoji:   emoji,
 		})
 	}
-	t.Main.br.QueueRemoteEvent(t.UserLogin, &simplevent.ReactionSync{
+	return &simplevent.ReactionSync{
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventReactionSync,
 			PortalKey: teamsid.MakePortalKey(ev.ThreadID, t.UserLogin.ID, t.splitPortals()),
 		},
 		TargetMessage: targetID,
 		Reactions:     &bridgev2.ReactionSyncData{Users: users, HasAllUsers: true},
-	})
+	}
 }
 
 func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {

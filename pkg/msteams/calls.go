@@ -383,7 +383,7 @@ func (c *Client) newCall(ctx context.Context, threadID string) (*Call, error) {
 		offers:      make(chan Renegotiation, 4),
 		answers:     make(chan callCallback, 1),
 		roster:      callRoster{changed: make(chan struct{}, 1)},
-		video:       callVideo{keyFrames: make(chan struct{}, 1), controls: make(chan string, 1), screenControls: make(chan string, 1), tag: newUUIDv4(), requestID: 1},
+		video:       callVideo{keyFrames: make(chan struct{}, 1), screenKeyFrames: make(chan struct{}, 1), controls: make(chan string, 1), screenControls: make(chan string, 1), tag: newUUIDv4(), requestID: 1},
 		ended:       make(chan struct{}),
 		hungUp:      make(chan struct{}),
 	}, nil

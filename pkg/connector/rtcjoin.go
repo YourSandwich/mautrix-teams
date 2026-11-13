@@ -317,9 +317,8 @@ func (t *TeamsClient) connectBridgedCall(live *liveCall, bc *bridgedCall) (*mste
 		if video := leg.Video(); video != nil {
 			bc.video.attach(ctx, video)
 		}
-		if call.Direct() {
-			go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests())
-		} else {
+		go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests(), leg.Done())
+		if !call.Direct() {
 			go watchVideo(bc, t.UserMRI)
 		}
 	}
@@ -428,7 +427,7 @@ func logMediaStats(bc *bridgedCall) {
 		evt := zerolog.Ctx(bc.ctx).Debug().Uint32("audio_sent", sent).Uint32("audio_received", received)
 		if video := bc.video.leg.Load(); video != nil {
 			sent, received = video.Stats()
-			evt = evt.Uint32("video_sent", sent).Uint32("video_received", received)
+			evt = evt.Uint32("video_sent", sent).Uint32("video_received", received).Uint32("rtcp_keyframe_requests", video.KeyFrameRequestCount())
 		}
 		evt.Msg("Call media")
 	}
@@ -492,9 +491,7 @@ func (t *TeamsClient) renegotiate(bc *bridgedCall, call *msteams.Call, offer mst
 	if video != nil {
 		bc.video.attach(bc.ctx, video)
 	}
-	if call.Direct() {
-		go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests())
-	}
+	go bc.video.forwardKeyFrameRequests(bc.ctx, leg.KeyFrameRequests(), leg.Done())
 	return true, nil
 }
 

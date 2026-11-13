@@ -115,7 +115,7 @@ func (c *Client) fetchTranscript(ctx context.Context, endpoint string) ([]byte, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	vtt, _, err := readDownload(resp, "transcript")
+	vtt, _, err := readDownload(resp, "transcript", maxDownloadSize)
 	return vtt, err
 }
 

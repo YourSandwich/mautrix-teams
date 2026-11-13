@@ -45,7 +45,13 @@ const (
 	trouterPingInterval    = 30 * time.Second
 	trouterClientVersion   = "27/24070119616"
 	trouterTCCV            = "2024.23.01.2"
+	// Teams' 1,000-person meetings at the roster's 4.5 KB per person come to about 4.5 MB.
+	trouterBodyLimit = 8 << 20
+	// Base64 of gzip's magic and its one method, 1f 8b 08; no JSON starts with H.
+	gzipBase64Magic = "H4sI"
 )
+
+var errBodyTooLarge = fmt.Errorf("unpacks to more than %d bytes", trouterBodyLimit)
 
 // Personal accounts get chat events through the Skype Trouter and registrar.
 const (
@@ -64,25 +70,32 @@ func (c *Client) startTrouter(ctx context.Context) error {
 	endpoint := c.trouterEndpointID()
 	c.log.Debug().Str("epid", endpoint).Msg("Starting Trouter")
 
-	info, err := c.trouterRegister(ctx, endpoint)
+	conn, info, err := c.trouterConnect(ctx, endpoint)
 	if err != nil {
-		return fmt.Errorf("register: %w", err)
+		return err
 	}
-	sessionID, err := c.trouterSession(ctx, info, endpoint)
-	if err != nil {
-		return fmt.Errorf("session: %w", err)
-	}
-	conn, err := c.trouterDial(ctx, info, sessionID, endpoint)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-
-	c.trouterSURL.Store(&info.SURL)
 	c.trouterEndpoint.Store(&endpoint)
 
 	c.wg.Add(1)
 	go c.runTrouter(conn, info, endpoint)
 	return nil
+}
+
+func (c *Client) trouterConnect(ctx context.Context, endpoint string) (*websocket.Conn, *trouterInfo, error) {
+	info, err := c.trouterRegister(ctx, endpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("register: %w", err)
+	}
+	sessionID, err := c.trouterSession(ctx, info, endpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("session: %w", err)
+	}
+	conn, err := c.trouterDial(ctx, info, sessionID, endpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial: %w", err)
+	}
+	c.trouterSURL.Store(&info.SURL)
+	return conn, info, nil
 }
 
 func (c *Client) TrouterEndpointID() string {
@@ -151,6 +164,9 @@ func (c *Client) trouterRegisterOnce(ctx context.Context, endpoint string) (*tro
 }
 
 func (c *Client) trouterHost() string {
+	if c.trouterHostForTest != "" {
+		return c.trouterHostForTest
+	}
 	if c.cfg.Personal {
 		return consumerTrouterHost
 	}
@@ -203,7 +219,7 @@ func (c *Client) trouterDial(ctx context.Context, info *trouterInfo, sessionID, 
 	if err != nil {
 		return nil, fmt.Errorf("websocket dial: %w", err)
 	}
-	conn.SetReadLimit(8 * 1024 * 1024)
+	conn.SetReadLimit(trouterBodyLimit)
 	return conn, nil
 }
 
@@ -224,52 +240,62 @@ func trouterCommonQuery(info *trouterInfo, endpoint string, conNum uint64) url.V
 	return q
 }
 
+const (
+	trouterFirstWait = 5 * time.Second
+	trouterMaxWait   = 5 * time.Minute
+)
+
 // runTrouter is the long-running goroutine that drains the WS, sends pings,
-// and reconnects on failure. Returns only when the Client is being torn down.
+// and reconnects on failure. Returns when the Client is torn down or gives up on its credentials.
 func (c *Client) runTrouter(conn *websocket.Conn, info *trouterInfo, endpoint string) {
 	defer c.wg.Done()
+	wait := trouterFirstWait
 	for {
-		err := c.trouterSession1(conn, info, endpoint)
+		up, err := c.trouterSession1(conn, info, endpoint)
 		conn.Close(websocket.StatusNormalClosure, "")
-		if c.closed.Load() {
+		if c.stopCtx.Err() != nil {
 			return
 		}
 		if err != nil {
 			c.log.Warn().Err(err).Msg("Trouter session ended; reconnecting")
 		}
-		// Back off briefly, then bootstrap from scratch (the surl/sessionId
-		// from the previous attempt are no longer valid).
-		select {
-		case <-c.stopCtx.Done():
+		if up {
+			wait = trouterFirstWait
+		}
+		if conn, info, wait, err = c.trouterReconnect(endpoint, wait); err != nil {
+			if IsCredentialError(err) {
+				c.log.Warn().Err(err).Msg("Trouter reconnect met a credential error; giving up")
+				c.refuseCredentials(err)
+			}
 			return
-		case <-time.After(5 * time.Second):
 		}
-		if err := c.ensureFreshTokens(c.stopCtx, true, true); err != nil {
-			c.log.Warn().Err(err).Msg("Token refresh before Trouter reconnect failed")
-			continue
-		}
-		newInfo, err := c.trouterRegister(c.stopCtx, endpoint)
-		if err != nil {
-			c.log.Warn().Err(err).Msg("Trouter re-register failed")
-			continue
-		}
-		newSID, err := c.trouterSession(c.stopCtx, newInfo, endpoint)
-		if err != nil {
-			c.log.Warn().Err(err).Msg("Trouter re-session failed")
-			continue
-		}
-		newConn, err := c.trouterDial(c.stopCtx, newInfo, newSID, endpoint)
-		if err != nil {
-			c.log.Warn().Err(err).Msg("Trouter re-dial failed")
-			continue
-		}
-		conn = newConn
-		info = newInfo
-		c.trouterSURL.Store(&info.SURL)
 	}
 }
 
-func (c *Client) trouterSession1(conn *websocket.Conn, info *trouterInfo, endpoint string) error {
+func (c *Client) trouterReconnect(endpoint string, wait time.Duration) (*websocket.Conn, *trouterInfo, time.Duration, error) {
+	for {
+		select {
+		case <-c.stopCtx.Done():
+			return nil, nil, wait, c.stopCtx.Err()
+		case <-c.trouterWait(wait):
+		}
+		wait = min(2*wait, trouterMaxWait)
+		err := c.ensureFreshTokens(c.stopCtx, true, true)
+		if err == nil {
+			var conn *websocket.Conn
+			var info *trouterInfo
+			if conn, info, err = c.trouterConnect(c.stopCtx, endpoint); err == nil {
+				return conn, info, wait, nil
+			}
+		}
+		if IsCredentialError(err) || c.stopCtx.Err() != nil {
+			return nil, nil, wait, err
+		}
+		c.log.Warn().Err(err).Dur("retry_in", wait).Msg("Trouter reconnect failed")
+	}
+}
+
+func (c *Client) trouterSession1(conn *websocket.Conn, info *trouterInfo, endpoint string) (up bool, err error) {
 	ctx, cancel := context.WithCancel(c.stopCtx)
 	defer cancel()
 
@@ -312,21 +338,24 @@ func (c *Client) trouterSession1(conn *websocket.Conn, info *trouterInfo, endpoi
 	for {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
-			return err
+			return up, err
 		}
 		if typ != websocket.MessageText {
 			continue
 		}
-		c.handleTrouterFrame(ctx, conn, info, endpoint, data)
+		if by := c.handleTrouterFrame(ctx, conn, info, endpoint, data); by != "" && !up {
+			up = true
+			c.log.Debug().Str("by", by).Msg("Trouter session confirmed up")
+		}
 	}
 }
 
 // handleTrouterFrame decodes one socket.io v0.9 frame. Format
 // "{type}:{id?}{+?}:{endpoint?}:{payload?}" - 1=connect, 2=heartbeat,
 // 3=ephemeral, 5=sequential, 6=ack.
-func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, info *trouterInfo, endpoint string, frame []byte) {
+func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, info *trouterInfo, endpoint string, frame []byte) (upBy string) {
 	if len(frame) == 0 {
-		return
+		return ""
 	}
 	c.log.Trace().Str("kind", string(frame[:1])).Int("len", len(frame)).Msg("Trouter frame")
 	switch frame[0] {
@@ -334,7 +363,7 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 		c.log.Debug().Msg("Trouter session up; authenticating and registering transports")
 		if err := c.trouterSendAuth(ctx, conn, info); err != nil {
 			c.log.Warn().Err(err).Msg("Trouter authenticate write failed")
-			return
+			return ""
 		}
 		if err := c.trouterSendActive(ctx, conn, true); err != nil {
 			c.log.Debug().Err(err).Msg("Trouter user.activity failed")
@@ -350,6 +379,7 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 		if payload := payloadAfter3Colons(frame); payload != nil {
 			c.handleTrouterRequest(ctx, conn, payload)
 		}
+		return "request"
 	case '5':
 		// Trouter redelivers event frames that aren't acked.
 		if id := socketIOAckID(frame); id != "" {
@@ -359,9 +389,13 @@ func (c *Client) handleTrouterFrame(ctx context.Context, conn *websocket.Conn, i
 			c.handleTrouterEvent(payload)
 		}
 	case '6':
+		if _, args, _ := bytes.Cut(payloadAfter3Colons(frame), []byte("+")); bytes.Equal(args, []byte(`["pong"]`)) {
+			return "pong"
+		}
 	default:
 		c.log.Debug().Str("frame_prefix", string(frame[:1])).Int("len", len(frame)).Msg("Trouter: unknown frame")
 	}
+	return ""
 }
 
 func socketIOAckID(frame []byte) string {
@@ -415,13 +449,15 @@ func (c *Client) handleTrouterRequest(ctx context.Context, conn *websocket.Conn,
 	reply, _ := json.Marshal(c.trouterReply(&req))
 	_ = conn.Write(ctx, websocket.MessageText, append([]byte("3:::"), reply...))
 
-	body := []byte(req.Body)
-	if strings.EqualFold(req.Headers["X-Microsoft-Skype-Content-Encoding"], "gzip") {
-		if gunzipped, err := gunzipBase64(req.Body); err != nil {
-			c.log.Debug().Err(err).Msg("Trouter: gunzip failed")
-		} else {
-			body = gunzipped
-		}
+	// Roster updates came gzipped without X-Microsoft-Skype-Content-Encoding.
+	if !strings.HasPrefix(req.Body, gzipBase64Magic) {
+		c.dispatchTrouterRequest(req.URL, []byte(req.Body))
+		return
+	}
+	body, err := gunzipBase64(req.Body)
+	if err != nil {
+		c.log.Warn().Err(err).Str("url", req.URL).Msg("Trouter: dropped a gzipped body that didn't unpack")
+		return
 	}
 	c.dispatchTrouterRequest(req.URL, body)
 }
@@ -444,7 +480,14 @@ func gunzipBase64(s string) ([]byte, error) {
 		return nil, fmt.Errorf("gzip: %w", err)
 	}
 	defer gz.Close()
-	return io.ReadAll(gz)
+	body, err := io.ReadAll(io.LimitReader(gz, trouterBodyLimit+1))
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("gzip: %w", err)
+	case len(body) > trouterBodyLimit:
+		return nil, fmt.Errorf("gzip: %w", errBodyTooLarge)
+	}
+	return body, nil
 }
 
 // trouterEvent is the JSON body inside a "5:N+::" frame (out-of-band signal
@@ -1192,6 +1235,7 @@ func (c *Client) trouterRegisterTransports(ctx context.Context, surl, endpoint s
 			{"TeamsCDLWebWorker", "TeamsCDLWebWorker_2.3", surl, endpoint + "_GG", ""},
 		}
 	}
+	registrar = firstNonEmpty(c.registrarURLForTest, registrar)
 	var firstErr error
 	for _, app := range apps {
 		description := map[string]any{

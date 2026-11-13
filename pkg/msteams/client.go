@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,7 @@ type ClientConfig struct {
 	Logger       zerolog.Logger
 	// Reused across restarts: Teams caps endpoints per account.
 	TrouterEndpointID string
+	Transport         http.RoundTripper
 }
 
 type Endpoints struct {
@@ -84,12 +86,15 @@ type Client struct {
 	// One-to-one calls ringing the user, for the connector to ring in Matrix.
 	incoming chan *IncomingCall
 	// Kept apart from events so a full event queue can't drop them.
-	resyncNeeded    chan struct{}
-	calendarChanged chan struct{}
+	resyncNeeded       chan struct{}
+	calendarChanged    chan struct{}
+	credentialsRefused chan error
 
 	authzURLForTest      string
+	trouterHostForTest   string
 	tokenEndpointForTest string
 	graphURLForTest      string
+	registrarURLForTest  string
 	chatSvcBase          string
 	mtBase               string
 	csaBase              string
@@ -113,10 +118,13 @@ type Client struct {
 	meetingContentAuth *Token
 	sharePointAuth     map[string]*Token
 	refresh            string
+	refusedScopes      map[string]bool
+	refusedSharePoint  map[string]bool
 
 	connected atomic.Bool
 	closed    atomic.Bool
 	closeOnce sync.Once
+	refused   atomic.Bool
 
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
@@ -126,6 +134,7 @@ type Client struct {
 	trouterEndpoint atomic.Pointer[string]
 	trouterCount    atomic.Uint64
 	trouterCmdSeq   atomic.Uint64
+	trouterWait     func(time.Duration) <-chan time.Time
 
 	cachedNamesLock sync.RWMutex
 	cachedNames     map[string]string
@@ -151,6 +160,9 @@ type Client struct {
 	recentRing   map[string]time.Time
 
 	callsByEndpoint sync.Map
+
+	redirectLock  sync.Mutex
+	redirectPairs map[[2]string]struct{}
 
 	presenceLock  sync.Mutex
 	presenceSubs  map[string]struct{}
@@ -251,7 +263,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		cfg:             cfg,
-		http:            &http.Client{Timeout: 60 * time.Second},
+		http:            &http.Client{Timeout: 60 * time.Second, Transport: cfg.Transport},
 		log:             cfg.Logger.With().Str("component", "msteams").Logger(),
 		events:          make(chan Event, 256),
 		incoming:        make(chan *IncomingCall, 4),
@@ -264,14 +276,57 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		mtBase:          firstNonEmpty(cfg.Endpoints.MTBase, DefaultMTBase),
 		stopCtx:         ctx,
 		stopCancel:      cancel,
+
+		credentialsRefused: make(chan error, 1),
+		trouterWait:        time.After,
+		refusedScopes:      make(map[string]bool),
+		refusedSharePoint:  make(map[string]bool),
+		redirectPairs:      make(map[[2]string]struct{}),
 	}
+	c.http.CheckRedirect = c.checkRedirect
 	if cfg.TrouterEndpointID != "" {
 		c.trouterEndpoint.Store(&cfg.TrouterEndpointID)
 	}
 	return c, nil
 }
 
+func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return ErrRedirectLoop
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	prev := via[len(via)-1].URL
+	if prev.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("%w: to %s://%s", ErrHTTPRedirect, req.URL.Scheme, req.URL.Host)
+	}
+	if from, to := strings.ToLower(prev.Hostname()), strings.ToLower(req.URL.Hostname()); from != to {
+		c.noteRedirect(from, to)
+	}
+	return nil
+}
+
+const maxRedirectPairs = 64
+
+func (c *Client) noteRedirect(from, to string) {
+	pair := [2]string{from, to}
+	c.redirectLock.Lock()
+	defer c.redirectLock.Unlock()
+	if _, seen := c.redirectPairs[pair]; seen || len(c.redirectPairs) >= maxRedirectPairs {
+		return
+	}
+	c.redirectPairs[pair] = struct{}{}
+	c.log.Warn().Str("from_host", from).Str("to_host", to).Msg("Request redirected to another host")
+	if len(c.redirectPairs) == maxRedirectPairs {
+		c.log.Warn().Int("pairs", maxRedirectPairs).Msg("Logged as many redirect host pairs as are kept; logging no more")
+	}
+}
+
 func (c *Client) Connect(ctx context.Context) error {
+	if c.refused.Load() {
+		return ErrTokenInvalid
+	}
 	c.tokenLock.RLock()
 	hasAuth := c.auth != nil && c.auth.Value != ""
 	hasSkype := c.skype != nil && c.skype.Value != ""
@@ -285,7 +340,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("refresh tokens: %w", err)
 	}
 	if err := c.startTrouter(ctx); err != nil {
-		return fmt.Errorf("start trouter: %w", err)
+		return fmt.Errorf("%w: %w", ErrTrouterStart, err)
 	}
 	c.connected.Store(true)
 	return nil
@@ -334,6 +389,18 @@ func (c *Client) Events() <-chan Event {
 
 func (c *Client) ResyncNeeded() <-chan struct{} {
 	return c.resyncNeeded
+}
+
+func (c *Client) CredentialsRefused() <-chan error {
+	return c.credentialsRefused
+}
+
+func (c *Client) refuseCredentials(why error) {
+	if c.refused.CompareAndSwap(false, true) {
+		c.connected.Store(false)
+		c.stopCancel()
+		c.credentialsRefused <- why
+	}
 }
 
 func (c *Client) CalendarChanged() <-chan struct{} {

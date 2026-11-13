@@ -41,7 +41,7 @@ type bridgedVideo struct {
 	enabled, mirror bool
 	leg             atomic.Pointer[teamsmedia.VideoLeg]
 	// In a one-to-one call: the other side, whose tile shows whatever the
-	// call's video lines carry, and what the other side asks keyframes of.
+	// call's video lines carry.
 	peer                   string
 	cameraKeys, screenKeys chan struct{}
 	// Wakes watchVideo, for a new roster or video leg.
@@ -72,20 +72,24 @@ type videoTile struct {
 	camera, screen videoOut
 }
 
-// videoOut is a published H.264 track; the Teams stream behind it can
-// change, so it keeps its own gapless sequence numbers.
 type videoOut struct {
-	lock  sync.Mutex
-	track *lksdk.LocalTrack
-	pub   *lksdk.LocalTrackPublication
-	seq   uint16
-	ssrc  uint32
+	lock               sync.Mutex
+	track              *lksdk.LocalTrack
+	pub                *lksdk.LocalTrackPublication
+	seqOffset, nextSeq uint16
+	ssrc               uint32
+	prevSSRC           uint32
+	prevSeq            uint16
 	// Set while the track is being published, which waits after a failure.
 	publishing bool
 	retryAt    time.Time
 }
 
 const publishRetry = 5 * time.Second
+
+const seqJump = 2048
+
+const lateWindow = 64
 
 func (v *bridgedVideo) addTile(mri string, room *lksdk.Room) {
 	v.lock.Lock()
@@ -181,7 +185,12 @@ func (v *bridgedVideo) pumpToLiveKit(ctx context.Context, leg *teamsmedia.VideoL
 func (o *videoOut) forward(ctx context.Context, room *lksdk.Room, pkt *rtp.Packet, screenShare bool, keyFrame func(ssrc uint32)) (started bool) {
 	o.lock.Lock()
 	defer o.lock.Unlock()
-	started, o.ssrc = o.ssrc != pkt.SSRC, pkt.SSRC
+	if late := int16(o.prevSeq - pkt.SequenceNumber); pkt.SSRC == o.prevSSRC && pkt.SSRC != o.ssrc && late >= 0 && late < lateWindow {
+		return false
+	}
+	if started = o.ssrc != pkt.SSRC; started {
+		o.prevSSRC, o.prevSeq, o.ssrc = o.ssrc, o.nextSeq-1-o.seqOffset, pkt.SSRC
+	}
 	if o.pub == nil {
 		if !o.publishing && time.Now().After(o.retryAt) {
 			o.publishing = true
@@ -189,12 +198,16 @@ func (o *videoOut) forward(ctx context.Context, room *lksdk.Room, pkt *rtp.Packe
 		}
 		return started
 	}
-	if started {
-		keyFrame(pkt.SSRC)
-	}
 	o.pub.SetMuted(false)
-	pkt.SequenceNumber = o.seq
-	o.seq++
+	seq := pkt.SequenceNumber + o.seqOffset
+	if jump := int16(seq - o.nextSeq); started || jump > seqJump || jump < -seqJump {
+		keyFrame(pkt.SSRC)
+		o.seqOffset, seq = o.nextSeq-pkt.SequenceNumber, o.nextSeq
+	}
+	if int16(seq-o.nextSeq) >= 0 {
+		o.nextSeq = seq + 1
+	}
+	pkt.SequenceNumber = seq
 	_ = o.track.WriteRTP(pkt, nil)
 	return started
 }
@@ -306,13 +319,13 @@ func (bc *bridgedCall) offerVideo(screen bool) {
 	log.Info().Msg("Switched video in the one-to-one call")
 }
 
-// forwardKeyFrameRequests passes on what a one-to-one call's other side asks
-// keyframes of to the camera or screen share it names.
-func (v *bridgedVideo) forwardKeyFrameRequests(ctx context.Context, requests <-chan uint32) {
+func (v *bridgedVideo) forwardKeyFrameRequests(ctx context.Context, requests <-chan uint32, legDone <-chan struct{}) {
 	for {
 		var ssrc uint32
 		select {
 		case <-ctx.Done():
+			return
+		case <-legDone:
 			return
 		case ssrc = <-requests:
 		}
@@ -381,15 +394,12 @@ func watchVideo(bc *bridgedCall, self string) {
 			if want[i] == current[i] {
 				continue
 			}
-			source := int64(want[i].source)
-			if want[i].source == 0 {
-				source = -1
-			}
-			if err := bc.call.SubscribeVideo(bc.ctx, slot.Mid, slot.StreamID, source); err != nil {
+			sub := videoSubscription(slot, want[i])
+			if err := bc.call.SubscribeVideo(bc.ctx, sub); err != nil {
 				log.Warn().Err(err).Str("mid", slot.Mid).Msg("Failed to subscribe to Teams video")
 				continue
 			}
-			log.Debug().Str("mid", slot.Mid).Int64("source", source).Str("participant", want[i].mri).Msg("Subscribed to Teams video")
+			log.Debug().Str("mid", slot.Mid).Int64("source", sub.Source).Str("participant", want[i].mri).Msg("Subscribed to Teams video")
 			bc.video.lock.Lock()
 			if bc.video.leg.Load() == leg {
 				bc.video.bindings[i] = want[i]
@@ -405,6 +415,14 @@ func watchVideo(bc *bridgedCall, self string) {
 			}
 		}
 	}
+}
+
+func videoSubscription(slot teamsmedia.VideoSlot, show videoBinding) msteams.VideoSubscription {
+	sub := msteams.VideoSubscription{Mid: slot.Mid, StreamID: slot.StreamID, Source: int64(show.source), Screen: slot.ScreenShare}
+	if show.source == 0 {
+		sub.Source = -1
+	}
+	return sub
 }
 
 // assignVideo picks what each slot shows: the screen-share slot the first
@@ -445,21 +463,47 @@ func assignVideo(slots []teamsmedia.VideoSlot, current []videoBinding, roster []
 	return want
 }
 
+// Each IDR blurs a still screen, and Teams may ask for keyframes in a burst.
+const keyFrameInterval = time.Second
+
+type keyFrameGate struct {
+	last time.Time
+}
+
+func (g *keyFrameGate) allow(now time.Time) bool {
+	if now.Sub(g.last) < keyFrameInterval {
+		return false
+	}
+	g.last = now
+	return true
+}
+
+const keyFramesBeforeWarning = 5
+
+type neededKeyFrames struct {
+	unanswered int
+}
+
+func (k *neededKeyFrames) ask(need bool, askKeyFrame func() bool) (warn bool) {
+	if !need {
+		k.unanswered = 0
+		return false
+	}
+	if !askKeyFrame() {
+		return false
+	}
+	k.unanswered++
+	return k.unanswered == keyFramesBeforeWarning
+}
+
 // pumpVideoToTeams sends the Matrix user's camera or screen share to Teams:
 // H.264 as it comes, VP8 or VP9 re-encoded by ffmpeg within what Teams takes,
 // which the offer names first and Teams's sender control changes later.
 func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 	mimeType, screen := track.Codec().MimeType, pub.Source() == livekit.TrackSource_SCREEN_SHARE
-	what, controls, keyFrames := "camera", bc.call.CameraControls(), bc.call.KeyFrameRequests()
+	what, controls, keyFrames, rtcpKeyFrames := "camera", bc.call.CameraControls(), bc.call.KeyFrameRequests(), bc.video.cameraKeys
 	if screen {
-		what, controls, keyFrames = "screen share", bc.call.ScreenControls(), nil
-	}
-	// A one-to-one call's other side asks keyframes of its own.
-	if bc.call.Direct() {
-		keyFrames = bc.video.cameraKeys
-		if screen {
-			keyFrames = bc.video.screenKeys
-		}
+		what, controls, keyFrames, rtcpKeyFrames = "screen share", bc.call.ScreenControls(), bc.call.ScreenKeyFrameRequests(), bc.video.screenKeys
 	}
 	log := zerolog.Ctx(bc.ctx).With().Str("codec", mimeType).Str("video", what).Logger()
 	send := func(pkt *rtp.Packet) {
@@ -472,36 +516,25 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 		}
 	}
 	transcode := !strings.EqualFold(mimeType, webrtc.MimeTypeH264)
-	var transcoder atomic.Pointer[teamsmedia.Transcoder]
-	// A new encoder starts from the next keyframe of the source.
-	encode := func(limits teamsmedia.VideoLimits) bool {
-		// The context ends ffmpeg with the call.
-		t, err := teamsmedia.NewTranscoder(bc.ctx, mimeType, limits, bc.video.mirror && !screen)
-		if err != nil {
-			log.Err(err).Msg("Failed to start the video transcoder")
-			return false
-		}
-		if old := transcoder.Swap(t); old != nil {
-			_ = old.Close()
-		}
-		go func() {
-			for {
-				packets, err := t.ReadPackets()
-				if err != nil {
-					if transcoder.Load() == t && bc.ctx.Err() == nil {
-						log.Warn().Err(err).Msg("The video transcoder stopped")
-					}
-					return
-				}
-				for _, pkt := range packets {
-					send(pkt)
-				}
+	done := make(chan struct{})
+	enc := &videoEncoder{
+		ctx: bc.ctx,
+		log: log,
+		start: func(limits teamsmedia.VideoLimits) (frameEncoder, error) {
+			// The context ends ffmpeg with the call.
+			t, err := teamsmedia.NewTranscoder(bc.ctx, mimeType, limits, bc.video.mirror && !screen)
+			if err != nil {
+				return nil, err
 			}
-		}()
-		rp.WritePLI(track.SSRC())
-		log.Info().Interface("limits", limits).Msg("Encoding Matrix video for Teams")
-		return true
+			return t, nil
+		},
+		keyFrame: func() { rp.WritePLI(track.SSRC()) },
+		now:      time.Now,
+		send:     send,
+		stopped:  make(chan encoderStop),
+		quit:     done,
 	}
+	defer enc.close()
 	info := pub.TrackInfo()
 	log.Info().Uint32("width", info.GetWidth()).Uint32("height", info.GetHeight()).Msg("Sending Matrix video to Teams")
 	// A camera can start out muted, which no mute event reports.
@@ -527,48 +560,59 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 	}
 	switch {
 	case !transcode:
-		rp.WritePLI(track.SSRC())
-	case !encode(limits):
+		enc.askKeyFrame()
+	case !enc.encode(limits):
 		return
 	}
-	done := make(chan struct{})
-	defer close(done)
+	// The encoder closes after the goroutine that could start another.
+	controlsEnded := make(chan struct{})
+	defer func() {
+		close(done)
+		<-controlsEnded
+	}()
 	go func() {
+		defer close(controlsEnded)
+		follow := limitFollower{current: limits}
 		settle := time.NewTimer(bitrateSettle)
 		settle.Stop()
-		var raised teamsmedia.VideoLimits
+		followRaise := func(now time.Time) {
+			restart, wait := follow.settle(now)
+			if restart {
+				enc.encodeFor(&follow)
+			}
+			if wait > 0 {
+				settle.Reset(wait)
+			} else {
+				settle.Stop()
+			}
+		}
 		for {
 			select {
 			case <-done:
 				return
-			// The encoder behind ffmpeg sends keyframes on its own.
 			case <-keyFrames:
-				if !transcode {
-					rp.WritePLI(track.SSRC())
-				}
+				enc.askKeyFrame()
+			case <-rtcpKeyFrames:
+				enc.askKeyFrame()
 			case params := <-controls:
 				if !transcode {
 					continue
 				}
-				switch next := teamsmedia.ParseVideoLimits(params); reencode(limits, next) {
-				case reencodeNow:
-					limits = next
-					settle.Stop()
-					encode(limits)
-				case reencodeSettled:
-					raised = next
-					settle.Reset(bitrateSettle)
-				default:
-					// The latest control counts, and it took the raise back.
-					settle.Stop()
+				now := time.Now()
+				if follow.name(teamsmedia.ParseVideoLimits(params), now) {
+					enc.encodeFor(&follow)
 				}
+				followRaise(now)
 			case <-settle.C:
-				limits = raised
-				encode(limits)
+				followRaise(time.Now())
+			case stop := <-enc.stopped:
+				if !enc.restart(stop) {
+					return
+				}
 			}
 		}
 	}()
-	var lastPLI time.Time
+	var needed neededKeyFrames
 	for {
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
@@ -578,19 +622,21 @@ func pumpVideoToTeams(bc *bridgedCall, track *webrtc.TrackRemote, pub *lksdk.Rem
 			send(pkt)
 			continue
 		}
-		// Frames built on a lost packet stay broken until the next keyframe.
-		if lost, _ := transcoder.Load().WriteRTP(pkt); lost && time.Since(lastPLI) > time.Second {
-			lastPLI = time.Now()
-			rp.WritePLI(track.SSRC())
+		run := enc.current.Load()
+		if run == nil {
+			return
 		}
-	}
-	if t := transcoder.Load(); t != nil {
-		_ = t.Close()
+		// A write fails only once ffmpeg has stopped, which its reader reports.
+		needKeyFrame, _ := run.enc.WriteRTP(pkt)
+		if needed.ask(needKeyFrame, enc.askKeyFrame) {
+			log.Warn().Int("requests", keyFramesBeforeWarning).Msg("The Matrix sender sent no keyframe when asked")
+		}
 	}
 }
 
-// Teams raises the bit rate in steps about a second apart.
-const bitrateSettle = 2 * time.Second
+// Teams often takes a raise back within seconds: a 10 s wait cut the restarts of
+// a measured minute of a share from 15 to 5 (mean SSIM 0.855 to 0.902).
+const bitrateSettle = 10 * time.Second
 
 const (
 	reencodeNever = iota
@@ -611,4 +657,37 @@ func reencode(current, next teamsmedia.VideoLimits) int {
 		return reencodeSettled
 	}
 	return reencodeNever
+}
+
+type limitFollower struct {
+	current teamsmedia.VideoLimits
+	raise   teamsmedia.VideoLimits
+	since   time.Time
+	waiting bool
+}
+
+func (f *limitFollower) name(next teamsmedia.VideoLimits, now time.Time) bool {
+	switch reencode(f.current, next) {
+	case reencodeNow:
+		f.current, f.waiting = next, false
+		return true
+	case reencodeSettled:
+		if !f.waiting || next != f.raise {
+			f.raise, f.since, f.waiting = next, now, true
+		}
+	default:
+		f.waiting = false
+	}
+	return false
+}
+
+func (f *limitFollower) settle(now time.Time) (restart bool, wait time.Duration) {
+	if !f.waiting {
+		return false, 0
+	}
+	if held := now.Sub(f.since); held < bitrateSettle {
+		return false, bitrateSettle - held
+	}
+	f.current, f.waiting = f.raise, false
+	return true, 0
 }

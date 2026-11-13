@@ -54,11 +54,14 @@ func TestAudioLegLoopback(t *testing.T) {
 	exchange := func(from, to *AudioLeg, fill byte) {
 		t.Helper()
 		frame := bytes.Repeat([]byte{fill}, FrameSize)
+		wrote := make(chan struct{})
 		go func() {
+			defer close(wrote)
 			for range 5 {
 				_ = from.WriteFrame(frame)
 			}
 		}()
+		defer func() { <-wrote }()
 		for i := range 5 {
 			pkt, err := to.ReadPacket()
 			if err != nil {
@@ -76,6 +79,24 @@ func TestAudioLegLoopback(t *testing.T) {
 	exchange(callee, caller, 0x22)
 	if sent, received := caller.Stats(); sent != 5 || received != 5 {
 		t.Errorf("caller stats sent=%d received=%d", sent, received)
+	}
+}
+
+func TestAudioLegDoneClosesWithLeg(t *testing.T) {
+	leg, err := NewAudioLeg(context.Background(), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-leg.Done():
+		t.Fatal("done before the leg closed")
+	default:
+	}
+	_ = leg.Close()
+	select {
+	case <-leg.Done():
+	default:
+		t.Error("not done after the leg closed")
 	}
 }
 

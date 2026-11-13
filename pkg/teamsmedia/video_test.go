@@ -131,8 +131,10 @@ func TestAnswerWithVideo(t *testing.T) {
 	}
 
 	nal := []byte{0x65, 0x88, 0x84}
+	wrote := make(chan struct{}, 2)
 	go func() {
 		_ = video.WriteRTP(&rtp.Packet{Header: rtp.Header{Version: 2, Marker: true, Timestamp: 9000, PayloadType: 96}, Payload: nal})
+		wrote <- struct{}{}
 	}()
 	got, err := teams.readRTP()
 	if err != nil {
@@ -144,6 +146,7 @@ func TestAnswerWithVideo(t *testing.T) {
 	// The screen share goes out on the screen-share line's own SSRC.
 	go func() {
 		_ = video.WriteScreenRTP(&rtp.Packet{Header: rtp.Header{Version: 2, Timestamp: 1}, Payload: nal})
+		wrote <- struct{}{}
 	}()
 	if got, err = teams.readRTP(); err != nil || got.SSRC != video.ssrc+101 || video.ScreenMid() != "3" {
 		t.Errorf("screen share came as ssrc %d (%v), screen mid %q", got.SSRC, err, video.ScreenMid())
@@ -153,7 +156,8 @@ func TestAnswerWithVideo(t *testing.T) {
 	teams.writeLock.Lock()
 	// A dominant speaker history as Teams sends it, newest first.
 	dsh, _ := hex.DecodeString("8fce00060000089900000000000300100000019e0000019e000000c9")
-	if err := teams.writeRTCP([]rtcp.Packet{&rtcp.ReceiverReport{SSRC: 2602}, &rtcp.PictureLossIndication{SenderSSRC: 5107, MediaSSRC: video.ssrc}, (*rtcp.RawPacket)(&dsh)}); err != nil {
+	screenFIR := &rtcp.FullIntraRequest{SenderSSRC: 5107, FIR: []rtcp.FIREntry{{SSRC: video.screenSSRC, SequenceNumber: 1}}}
+	if err := teams.writeRTCP([]rtcp.Packet{&rtcp.ReceiverReport{SSRC: 2602}, &rtcp.PictureLossIndication{SenderSSRC: 5107, MediaSSRC: video.ssrc}, (*rtcp.RawPacket)(&dsh), screenFIR}); err != nil {
 		t.Fatal(err)
 	}
 	for i, pt := range []uint8{107, 102} {
@@ -172,9 +176,24 @@ func TestAnswerWithVideo(t *testing.T) {
 	if got := audio.DominantSpeaker(); got != 0x19e {
 		t.Errorf("dominant speaker = %d", got)
 	}
+	for _, want := range []uint32{video.ssrc, video.screenSSRC} {
+		select {
+		case got := <-audio.KeyFrameRequests():
+			if got != want {
+				t.Errorf("keyframe asked of %d, want %d", got, want)
+			}
+		default:
+			t.Errorf("no keyframe asked of %d", want)
+		}
+	}
+	if n := audio.KeyFrameRequestCount(); n != 2 {
+		t.Errorf("%d keyframe requests counted, want 2", n)
+	}
 	if report := audio.linkReport(time.Now()); !bytes.HasPrefix(report, []byte{0, 1, 0, 12, 0, 0, 0x0a, 0x2a}) || len(report) != 32 {
 		t.Errorf("link report %x: want a bandwidth estimate for Teams's SSRC 2602, then the peer info", report)
 	}
+	<-wrote
+	<-wrote
 	if sent, received := video.Stats(); sent != 2 || received != 1 {
 		t.Errorf("video stats %d/%d", sent, received)
 	}

@@ -19,9 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -213,5 +216,93 @@ func TestPersonalSkypeToken(t *testing.T) {
 	}
 	if c.SkypeID() != "live:.cid.0123456789abcdef" || c.ChatSvcBase() != "https://teams.live.com/api/chatsvc/consumer" || c.mtBaseURL() != "https://teams.live.com/api/mt" {
 		t.Errorf("skype id %q, chat %q, mt %q", c.SkypeID(), c.ChatSvcBase(), c.mtBaseURL())
+	}
+}
+
+func TestRefusedSharePointScopesAreCapped(t *testing.T) {
+	var mu sync.Mutex
+	posts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		posts[r.PostFormValue("scope")]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"consent required"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t)
+	c.tokenEndpointForTest, c.refresh = srv.URL, "refresh-value"
+	ctx := context.Background()
+	want := map[string]int{csaOAuthScope: 1}
+	for i := range maxRefusedSharePoint + 1 {
+		host := fmt.Sprintf("site%d.example.invalid", i)
+		for range 2 {
+			if err := c.RefreshSharePointToken(ctx, host); !errors.Is(err, ErrTokenInvalid) {
+				t.Fatalf("SharePoint host %s: %v, want ErrTokenInvalid", host, err)
+			}
+		}
+		want["https://"+host+"/.default offline_access"] = 1
+		if i == maxRefusedSharePoint {
+			want["https://"+host+"/.default offline_access"] = 2
+		}
+	}
+	for range 2 {
+		if err := c.RefreshCsaToken(ctx); !errors.Is(err, ErrTokenInvalid) {
+			t.Errorf("refused csa scope: %v, want ErrTokenInvalid", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !maps.Equal(posts, want) {
+		t.Errorf("posts per scope %v, want each of the first %d SharePoint scopes and the csa scope once, the SharePoint one past the cap on each call", posts, maxRefusedSharePoint)
+	}
+}
+
+func TestRefusedResourceScopeIsAskedOnce(t *testing.T) {
+	var mu sync.Mutex
+	posts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope := r.PostFormValue("scope")
+		mu.Lock()
+		posts[scope]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if scope == csaOAuthScope {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"consent required"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"access_token":"access-new","expires_in":3600}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t)
+	c.tokenEndpointForTest, c.refresh = srv.URL, "refresh-value"
+	c.connected.Store(true)
+	ctx := context.Background()
+
+	for range 2 {
+		if err := c.RefreshCsaToken(ctx); !errors.Is(err, ErrTokenInvalid) {
+			t.Errorf("refused scope: %v, want ErrTokenInvalid", err)
+		}
+	}
+	if err := c.RefreshSearchToken(ctx); err != nil {
+		t.Errorf("another scope after the refusal: %v", err)
+	}
+	if err := c.RefreshAuthToken(ctx); err != nil {
+		t.Errorf("the login's scope after the refusal: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := map[string]int{csaOAuthScope: 1, searchOAuthScope: 1, workOAuthScope: 1}; !maps.Equal(posts, want) {
+		t.Errorf("posts per scope %v, want %v", posts, want)
+	}
+	select {
+	case err := <-c.CredentialsRefused():
+		t.Errorf("a resource scope's refusal ended the login: %v", err)
+	default:
+	}
+	if !c.IsLoggedIn() {
+		t.Error("a resource scope's refusal logged the client out")
 	}
 }

@@ -59,9 +59,9 @@ type transport struct {
 	// Made for the first offer keyed with DTLS.
 	dtlsCert *dtlsCertificate
 	// The SSRC Teams sends its reports from.
-	remoteSSRC atomic.Uint32
-	// The SSRCs of the bridge's streams the other side asks keyframes for.
-	keyFrames chan uint32
+	remoteSSRC       atomic.Uint32
+	keyFrames        chan uint32
+	keyFrameRequests atomic.Uint32
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -222,8 +222,16 @@ func (t *transport) KeyFrameRequests() <-chan uint32 {
 	return t.keyFrames
 }
 
-// requestKeyFrame drops requests nobody reads, as in meetings.
+func (t *transport) Done() <-chan struct{} {
+	return t.stop
+}
+
+func (t *transport) KeyFrameRequestCount() uint32 {
+	return t.keyFrameRequests.Load()
+}
+
 func (t *transport) requestKeyFrame(ssrc uint32) {
+	t.keyFrameRequests.Add(1)
 	select {
 	case t.keyFrames <- ssrc:
 	default:

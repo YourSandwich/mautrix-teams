@@ -20,9 +20,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/build"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -421,7 +423,7 @@ func TestRenegotiateDirectCall(t *testing.T) {
 		t.Fatalf("answer %q, %v", answer, err)
 	}
 	f.mu.Lock()
-	created, sent, acked := f.bodies["/epconv"], f.bodies["/cc/1/renegotiate"], f.seen[len(f.seen)-1]
+	created, sent, seen := f.bodies["/epconv"], f.bodies["/cc/1/renegotiate"], slices.Clone(f.seen)
 	f.mu.Unlock()
 	negotiation, _ := sent["mediaNegotiation"].(map[string]any)
 	media, _ := negotiation["mediaContent"].(map[string]any)
@@ -430,8 +432,9 @@ func TestRenegotiateDirectCall(t *testing.T) {
 		!strings.HasSuffix(media["negotiationTag"].(string), ";v_1") || fmt.Sprint(negotiation["callModalities"]) != "[Audio Video]" {
 		t.Errorf("renegotiation %v", negotiation)
 	}
-	if acked != "/mediaAnswers/1/acknowledge?i=3" {
-		t.Errorf("last request %q, want the acknowledgement", acked)
+	renegotiated := slices.IndexFunc(seen, func(path string) bool { return strings.HasPrefix(path, "/cc/1/renegotiate?") })
+	if renegotiated < 0 || !slices.ContainsFunc(seen[renegotiated+1:], func(path string) bool { return strings.HasPrefix(path, "/mediaAnswers/1/acknowledge?") }) {
+		t.Errorf("requests %q, want the answer acknowledged after the renegotiation", seen)
 	}
 
 	// Mute goes out with the endpoint properties of a direct call.
@@ -903,6 +906,16 @@ func TestSetCamera(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("screen control not delivered")
 	}
+	select {
+	case <-call.ScreenKeyFrameRequests():
+	default:
+		t.Error("the screen share's keyframe request was not delivered")
+	}
+	select {
+	case <-call.KeyFrameRequests():
+		t.Error("the screen share's keyframe request reached the camera")
+	default:
+	}
 	if err := call.SetVideo(ctx, VideoState{Mids: []string{"2", "5", "3"}, ScreenMid: "3", Camera: true, Screen: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -927,29 +940,63 @@ func TestSetCamera(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-f.hangupOK
-	if err := call.SubscribeVideo(ctx, "5", 416, 202); err != nil {
-		t.Fatal(err)
+	type controlInfo struct {
+		SourceID   int64            `json:"sourceId"`
+		StreamMsid uint32           `json:"streamMsid"`
+		FmtParams  []map[string]any `json:"fmtParams"`
 	}
-	f.mu.Lock()
-	sub, _ := f.bodies["/mc/1/applyChannelParameters"]["applyChannelParameters"].(map[string]any)["multiChannelParameter"].(map[string]any)
-	f.mu.Unlock()
-	var control struct {
-		ControlVideoStreaming struct {
-			ControlInfo struct {
-				SourceID   int64            `json:"sourceId"`
-				StreamMsid uint32           `json:"streamMsid"`
-				FmtParams  []map[string]any `json:"fmtParams"`
-			} `json:"controlInfo"`
-		} `json:"controlVideoStreaming"`
+	subscribe := func(mid string, streamID uint32, source int64, screen bool) (map[string]any, controlInfo) {
+		t.Helper()
+		if err := call.SubscribeVideo(ctx, VideoSubscription{Mid: mid, StreamID: streamID, Source: source, Screen: screen}); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		sub, _ := f.bodies["/mc/1/applyChannelParameters"]["applyChannelParameters"].(map[string]any)["multiChannelParameter"].(map[string]any)
+		f.mu.Unlock()
+		var control struct {
+			ControlVideoStreaming struct {
+				ControlInfo controlInfo `json:"controlInfo"`
+			} `json:"controlVideoStreaming"`
+		}
+		mediaParameter, _ := sub["mediaParameter"].(string)
+		if err := json.Unmarshal([]byte(mediaParameter), &control); err != nil {
+			t.Fatal(err)
+		}
+		return sub, control.ControlVideoStreaming.ControlInfo
 	}
-	mediaParameter, _ := sub["mediaParameter"].(string)
-	if err := json.Unmarshal([]byte(mediaParameter), &control); err != nil {
-		t.Fatal(err)
+	sub, info := subscribe("5", 416, 202, false)
+	if mids, _ := sub["mids"].([]any); len(mids) != 1 || mids[0] != "5" || info.SourceID != 202 || info.StreamMsid != 416 ||
+		info.FmtParams[0]["max-fs"] != float64(8160) || info.FmtParams[0]["max-mbps"] != float64(520000) || info.FmtParams[0]["max-fps"] != float64(6000) {
+		t.Errorf("camera subscription = %v", sub)
 	}
-	info := control.ControlVideoStreaming.ControlInfo
-	if mids, _ := sub["mids"].([]any); len(mids) != 1 || mids[0] != "5" || info.SourceID != 202 || info.StreamMsid != 416 || info.FmtParams[0]["max-fs"] != float64(8160) {
-		t.Errorf("subscription = %v", sub)
+	sub, info = subscribe("3", 425, 212, true)
+	if mids, _ := sub["mids"].([]any); len(mids) != 1 || mids[0] != "3" || info.SourceID != 212 || info.StreamMsid != 425 ||
+		info.FmtParams[0]["max-fs"] != float64(32400) || info.FmtParams[0]["max-mbps"] != float64(972000) || info.FmtParams[0]["max-fps"] != float64(3000) {
+		t.Errorf("screen share subscription = %v", sub)
 	}
+}
+
+func TestClientLinksNoMediaStack(t *testing.T) {
+	const module, media = "go.mau.fi/mautrix-teams/", "go.mau.fi/mautrix-teams/pkg/teamsmedia"
+	seen := map[string]bool{}
+	var walk func(dir string)
+	walk = func(dir string) {
+		pkg, err := build.ImportDir(dir, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range pkg.Imports {
+			rel, ours := strings.CutPrefix(path, module)
+			switch {
+			case path == media:
+				t.Errorf("%s imports %s", dir, path)
+			case ours && !seen[rel]:
+				seen[rel] = true
+				walk(filepath.Join("..", "..", rel))
+			}
+		}
+	}
+	walk(".")
 }
 
 // A frame for a call the bridge already hung up names an event where a

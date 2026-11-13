@@ -82,6 +82,24 @@ func TestAssignVideo(t *testing.T) {
 	}
 }
 
+func TestVideoSubscription(t *testing.T) {
+	camera, screen := teamsmedia.VideoSlot{Mid: "5", StreamID: 416}, teamsmedia.VideoSlot{Mid: "3", StreamID: 425, ScreenShare: true}
+	for _, c := range []struct {
+		slot teamsmedia.VideoSlot
+		show videoBinding
+		want msteams.VideoSubscription
+	}{
+		{camera, videoBinding{202, "8:live:a"}, msteams.VideoSubscription{Mid: "5", StreamID: 416, Source: 202}},
+		{camera, videoBinding{}, msteams.VideoSubscription{Mid: "5", StreamID: 416, Source: -1}},
+		{screen, videoBinding{212, "8:live:a"}, msteams.VideoSubscription{Mid: "3", StreamID: 425, Source: 212, Screen: true}},
+		{screen, videoBinding{}, msteams.VideoSubscription{Mid: "3", StreamID: 425, Source: -1, Screen: true}},
+	} {
+		if got := videoSubscription(c.slot, c.show); got != c.want {
+			t.Errorf("%s showing %+v: %+v, want %+v", c.slot.Mid, c.show, got, c.want)
+		}
+	}
+}
+
 func TestLiveMeetingRoom(t *testing.T) {
 	tc := &TeamsClient{liveCalls: map[id.RoomID]*liveCall{
 		"!chat":  {meeting: &msteams.LiveMeeting{MeetingCode: "267396016381573"}},

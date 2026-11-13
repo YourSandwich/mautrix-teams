@@ -18,7 +18,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -39,6 +41,7 @@ func init() {
 		"msteams-not-logged-in": "Please log in again",
 		"msteams-invalid-auth":  "Invalid credentials, please log in again",
 		"msteams-connect-error": "Failed to connect to Teams",
+		"msteams-connect-retry": "Teams can't be reached, trying again",
 		"msteams-token-expired": "Teams session expired, please log in again",
 	})
 }
@@ -49,7 +52,10 @@ type TeamsClient struct {
 	Client    *msteams.Client
 	UserMRI   string
 
-	stopPump context.CancelFunc
+	loopsLock    sync.Mutex
+	stopPump     context.CancelFunc
+	connecting   chan struct{}
+	disconnected bool
 
 	liveCallsLock sync.Mutex
 	liveCalls     map[id.RoomID]*liveCall
@@ -92,7 +98,7 @@ func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	return nil
 }
 
-func (t *TeamsClient) Connect(ctx context.Context) {
+func (t *TeamsClient) Connect(_ context.Context) {
 	if t.Client == nil {
 		t.UserLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateBadCredentials,
@@ -100,24 +106,116 @@ func (t *TeamsClient) Connect(ctx context.Context) {
 		})
 		return
 	}
-	if err := t.Client.Connect(ctx); err != nil {
-		t.UserLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateUnknownError,
-			Error:      "msteams-connect-error",
-			Message:    err.Error(),
-		})
+	t.connect(t.storingTokens(t.Client.Connect), time.After, t.start)
+}
+
+func (t *TeamsClient) storingTokens(attempt func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		err := attempt(ctx)
+		if err != nil && ctx.Err() == nil {
+			t.persistTokens(ctx)
+		}
+		return err
+	}
+}
+
+func (t *TeamsClient) connect(attempt func(context.Context) error, after func(time.Duration) <-chan time.Time, start func(context.Context)) {
+	t.stopLoops()
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = t.UserLogin.Log.With().Str("component", "teams events").Logger().WithContext(ctx)
+	done := make(chan struct{})
+	t.loopsLock.Lock()
+	if t.disconnected {
+		t.loopsLock.Unlock()
+		cancel()
 		return
 	}
-	t.persistTokens(ctx)
-	loopCtx, cancel := context.WithCancel(context.Background())
-	loopCtx = t.UserLogin.Log.With().Str("component", "teams events").Logger().WithContext(loopCtx)
-	t.stopPump = cancel
-	go t.eventLoop(loopCtx)
-	t.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-	go t.syncChats(loopCtx)
-	if t.Main.Config.Calls.UpcomingMeetings {
-		go t.upcomingMeetingsLoop(loopCtx)
+	t.stopPump, t.connecting = cancel, done
+	t.loopsLock.Unlock()
+	err := attempt(ctx)
+	if err == nil {
+		if ctx.Err() == nil {
+			start(ctx)
+		}
+		close(done)
+		return
 	}
+	go func() {
+		defer close(done)
+		if reconnect(ctx, err, attempt, t.UserLogin.BridgeState.Send, after) {
+			start(ctx)
+		}
+	}()
+}
+
+func (t *TeamsClient) stopLoops() {
+	t.loopsLock.Lock()
+	stop, connecting := t.stopPump, t.connecting
+	t.stopPump, t.connecting = nil, nil
+	t.loopsLock.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if connecting != nil {
+		<-connecting
+	}
+}
+
+func (t *TeamsClient) start(ctx context.Context) {
+	t.persistTokens(ctx)
+	go t.eventLoop(ctx)
+	t.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+	// Watched only once connected, so no connected state follows a refusal.
+	go t.reportRefusal(ctx, t.Client.CredentialsRefused(), t.UserLogin.BridgeState.Send)
+	go t.syncChats(ctx)
+	if t.Main.Config.Calls.UpcomingMeetings {
+		go t.upcomingMeetingsLoop(ctx)
+	}
+}
+
+func (t *TeamsClient) reportRefusal(ctx context.Context, refused <-chan error, report func(status.BridgeState)) {
+	select {
+	case <-ctx.Done():
+	case err := <-refused:
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Teams refused the login's credentials")
+		report(status.BridgeState{StateEvent: status.StateBadCredentials, Error: "msteams-invalid-auth", Message: err.Error()})
+		t.stopLoops()
+	}
+}
+
+const (
+	reconnectFirstWait = 5 * time.Second
+	reconnectMaxWait   = 5 * time.Minute
+)
+
+func reconnect(ctx context.Context, err error, connect func(context.Context) error,
+	report func(status.BridgeState), after func(time.Duration) <-chan time.Time) bool {
+	for wait := reconnectFirstWait; ctx.Err() == nil; wait = min(2*wait, reconnectMaxWait) {
+		switch {
+		case msteams.IsCredentialError(err):
+			report(status.BridgeState{StateEvent: status.StateBadCredentials, Error: "msteams-invalid-auth", Message: err.Error()})
+			return false
+		case !transientConnectError(err):
+			report(status.BridgeState{StateEvent: status.StateUnknownError, Error: "msteams-connect-error", Message: err.Error()})
+			return false
+		}
+		zerolog.Ctx(ctx).Warn().Err(err).Dur("retry_in", wait).Msg("Failed to connect to Teams; trying again")
+		report(status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: "msteams-connect-retry", Message: err.Error()})
+		select {
+		case <-ctx.Done():
+			return false
+		case <-after(wait):
+		}
+		if err = connect(ctx); err == nil {
+			return ctx.Err() == nil
+		}
+	}
+	return false
+}
+
+func transientConnectError(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, msteams.ErrTrouterStart) || errors.As(err, &netErr)
 }
 
 func (t *TeamsClient) persistTokens(ctx context.Context) {
@@ -150,7 +248,7 @@ func (t *TeamsClient) persistTokens(ctx context.Context) {
 	}
 	// Pull the organisation name once per session so the personal space can
 	// label itself with the tenant the user is actually logged into.
-	if meta.TenantName == "" {
+	if meta.TenantName == "" && t.Client.IsLoggedIn() {
 		if name := t.Client.CurrentTenantName(ctx); name != "" {
 			meta.TenantName = name
 			dirty = true
@@ -165,10 +263,10 @@ func (t *TeamsClient) persistTokens(ctx context.Context) {
 
 func (t *TeamsClient) Disconnect() {
 	t.leaveLiveCalls(t.UserLogin.Log.WithContext(context.Background()))
-	if t.stopPump != nil {
-		t.stopPump()
-		t.stopPump = nil
-	}
+	t.loopsLock.Lock()
+	t.disconnected = true
+	t.loopsLock.Unlock()
+	t.stopLoops()
 	if t.Client != nil {
 		_ = t.Client.Close()
 	}

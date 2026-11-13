@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -248,12 +249,44 @@ func (t *TeamsClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridge
 }
 
 func (t *TeamsClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
+	key, err := t.teamsReactionKey(ctx, msg)
+	if err != nil {
+		return bridgev2.MatrixReactionPreResponse{}, err
+	}
 	// Store the EmojiID as the Teams reaction key (not the glyph) so the echoed
 	// ReactionSync, which is keyed on the same key, dedups instead of duplicating.
 	return bridgev2.MatrixReactionPreResponse{
 		SenderID: teamsid.MakeUserID(t.UserMRI),
-		EmojiID:  networkid.EmojiID(msteams.TeamsReactionKey(msg.Content.RelatesTo.Key)),
+		EmojiID:  networkid.EmojiID(key),
 	}, nil
+}
+
+func (t *TeamsClient) teamsReactionKey(ctx context.Context, msg *bridgev2.MatrixReaction) (string, error) {
+	reactions, err := t.Main.br.DB.Reaction.GetAllToMessage(ctx, msg.Portal.Receiver, msg.TargetMessage.ID)
+	if err != nil {
+		return "", fmt.Errorf("read the reactions to the message: %w", err)
+	}
+	catalog := msteams.TeamsReactionKey(msg.Content.RelatesTo.Key)
+	shown := variationselector.Remove(msg.Content.RelatesTo.Key)
+	var found string
+	for _, r := range reactions {
+		key := string(r.EmojiID)
+		glyph := msteams.DecodeReactionKey(key)
+		// Teams lists acknowledgements among reactions; a key that decodes to itself has no emoji.
+		if key == msteams.AcknowledgementKey || glyph == key || variationselector.Remove(glyph) != shown {
+			continue
+		}
+		if key == catalog {
+			return key, nil
+		}
+		if found == "" || key < found {
+			found = key
+		}
+	}
+	if found == "" {
+		return catalog, nil
+	}
+	return found, nil
 }
 
 func (t *TeamsClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {

@@ -23,8 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -43,13 +45,12 @@ type SendOptions struct {
 	Importance string
 }
 
-// sendMessageRequest mirrors the Teams web client's POST body. Any field not
-// set by the web client (type, from, composetime, etc.) MUST be omitted -
-// Teams 201's the POST but silently drops delivery when those are present,
-// even as empty strings. Every field below must carry omitempty.
+// sendMessageRequest mirrors the Teams web client's POST body: a field it leaves out
+// must be omitted, even empty, or Teams 201's the POST and drops delivery. content
+// goes even empty, as with a file card alone, which Teams drops without it.
 type sendMessageRequest struct {
 	ClientMessageID string `json:"clientmessageid"`
-	Content         string `json:"content,omitempty"`
+	Content         string `json:"content"`
 	MessageType     string `json:"messagetype,omitempty"`
 	ContentType     string `json:"contenttype,omitempty"`
 	IMDisplayName   string `json:"imdisplayname,omitempty"`
@@ -290,10 +291,11 @@ func TeamsReactionKey(emoji string) string {
 	return emoji
 }
 
+const AcknowledgementKey = "acks"
+
 // DecodeReactionKey turns a Teams reaction key back into the emoji glyph.
 // Looks up the full Teams catalog first so legacy short names like "cool"
-// or "yes" resolve to their real emoji; unknown keys fall back to parsing
-// the "<hex>_*" prefix as a codepoint.
+// or "yes" resolve; ":<name>:" for an organisation's own emoji, else a "<hex>_*" codepoint.
 func DecodeReactionKey(key string) string {
 	if emoji, ok := teamsEmojiReverse[key]; ok {
 		return emoji
@@ -303,9 +305,11 @@ func DecodeReactionKey(key string) string {
 			return withSkinTone(emoji, noSkinTone+rune(tone[0]-'0'))
 		}
 	}
-	// Teams keeps message acknowledgements among the reactions, outside the catalog.
-	if key == "acks" {
+	if key == AcknowledgementKey {
 		return "✅"
+	}
+	if name, _, custom := strings.Cut(key, ";"); custom && name != "" {
+		return ":" + name + ":"
 	}
 	hexPart := key
 	if i := strings.Index(key, "_"); i >= 0 {
@@ -638,7 +642,7 @@ func (c *Client) FetchAttachment(ctx context.Context, attachmentURL string) ([]b
 	var ctype string
 	err := c.withSkypeRetry(ctx, func(skype string) error {
 		var err error
-		data, ctype, err = c.fetchAMS(ctx, attachmentURL, skype)
+		data, ctype, err = c.fetchAMS(ctx, attachmentURL, skype, 64<<20)
 		return err
 	})
 	return data, ctype, err
@@ -650,7 +654,8 @@ var amsHostSuffixes = []string{".asyncgw.teams.microsoft.com", ".asm.skype.com",
 
 func (c *Client) isAMSHost(u *url.URL) bool {
 	host := u.Hostname()
-	if base, err := url.Parse(firstNonEmpty(c.amsBaseURL(), c.cfg.Endpoints.AMSBase, DefaultAMSBase)); err == nil && host == base.Hostname() {
+	if base, err := url.Parse(firstNonEmpty(c.amsBaseURL(), c.cfg.Endpoints.AMSBase, DefaultAMSBase)); err == nil &&
+		host == base.Hostname() && u.Scheme == base.Scheme {
 		return true
 	}
 	if u.Scheme != "https" {
@@ -664,7 +669,7 @@ func (c *Client) isAMSHost(u *url.URL) bool {
 	return false
 }
 
-func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]byte, string, error) {
+func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string, limit int64) ([]byte, string, error) {
 	if skype == "" {
 		return nil, "", ErrUnauthorized
 	}
@@ -692,23 +697,53 @@ func (c *Client) fetchAMS(ctx context.Context, attachmentURL, skype string) ([]b
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, "", fmt.Errorf("ams fetch %s: %d %s", attachmentURL, resp.StatusCode, string(body))
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+	data, err := readAtMost(resp.Body, limit)
 	if err != nil {
 		return nil, "", err
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }
 
+func readAtMost(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: over %d bytes", ErrTooLarge, limit)
+	}
+	return data, nil
+}
+
 func (c *Client) FetchSharedFile(ctx context.Context, f SharedFile) ([]byte, string, error) {
 	data, ctype, err := c.fetchSharePointFile(ctx, f)
+	if err == nil {
+		err = pageNotFile(f.Name, ctype)
+	}
 	if err == nil || ctx.Err() != nil {
 		return data, ctype, err
 	}
 	data, ctype, gerr := c.fetchSharedFileViaGraph(ctx, f)
+	if gerr == nil {
+		gerr = pageNotFile(f.Name, ctype)
+	}
 	if gerr != nil {
 		return nil, "", fmt.Errorf("%w; graph fallback: %w", err, gerr)
 	}
 	return data, ctype, nil
+}
+
+// SharePoint can answer 200 with a sign-in or viewer page where the file was asked for.
+func pageNotFile(name, contentType string) error {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "text/html" {
+		return nil
+	}
+	switch strings.ToLower(path.Ext(name)) {
+	case ".html", ".htm":
+		return nil
+	}
+	return ErrPageNotFile
 }
 
 func (c *Client) fetchSharedFileViaGraph(ctx context.Context, f SharedFile) ([]byte, string, error) {
@@ -734,7 +769,7 @@ func (c *Client) fetchSharedFileViaGraph(ctx context.Context, f SharedFile) ([]b
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	return readDownload(resp, "graph shares")
+	return readDownload(resp, "graph shares", maxDownloadSize)
 }
 
 func (c *Client) fetchSharePointFile(ctx context.Context, f SharedFile) ([]byte, string, error) {
@@ -761,10 +796,12 @@ func (c *Client) fetchSharePointFile(ctx context.Context, f SharedFile) ([]byte,
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	return readDownload(resp, "sharepoint fetch "+endpoint)
+	return readDownload(resp, "sharepoint fetch "+endpoint, maxDownloadSize)
 }
 
-func readDownload(resp *http.Response, what string) ([]byte, string, error) {
+const maxDownloadSize = 256 << 20
+
+func readDownload(resp *http.Response, what string, limit int64) ([]byte, string, error) {
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return nil, "", fmt.Errorf("%s: %w", what, ErrTokenExpired)
@@ -774,9 +811,9 @@ func readDownload(resp *http.Response, what string) ([]byte, string, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, "", fmt.Errorf("%s: %d %s", what, resp.StatusCode, string(body))
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024*1024))
+	data, err := readAtMost(resp.Body, limit)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("%s: %w", what, err)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }

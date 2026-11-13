@@ -25,4 +25,13 @@ var (
 	ErrForbidden      = errors.New("msteams: forbidden")
 	ErrNotFound       = errors.New("msteams: not found")
 	ErrRateLimited    = errors.New("msteams: rate limited")
+	ErrTrouterStart   = errors.New("msteams: trouter did not start")
+	ErrPageNotFile    = errors.New("msteams: a web page came instead of the shared file")
+	ErrTooLarge       = errors.New("msteams: download over its size limit")
+	ErrHTTPRedirect   = errors.New("msteams: redirect from https to http")
+	ErrRedirectLoop   = errors.New("msteams: stopped after 10 redirects")
 )
+
+func IsCredentialError(err error) bool {
+	return errors.Is(err, ErrTokenInvalid) || errors.Is(err, ErrTokenExpired) || errors.Is(err, ErrUnauthorized)
+}

@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"go.mau.fi/mautrix-teams/pkg/teamsvideo"
 )
 
 // callVideo holds what switching video needs: the call leg's links, which
@@ -32,8 +34,8 @@ type callVideo struct {
 	links map[string]string
 	// Where a direct call's own renegotiations go, which a person's
 	// acceptance may name without the other links.
-	renegotiation string
-	keyFrames     chan struct{}
+	renegotiation              string
+	keyFrames, screenKeyFrames chan struct{}
 	// The latest sender control for the camera and for the screen share;
 	// only the newest counts.
 	controls, screenControls chan string
@@ -82,13 +84,13 @@ func (v *callVideo) nextRequestID() int {
 // it names that source, and for its camera otherwise.
 func (v *callVideo) handleControl(c *controlVideoStreaming, screenSource uint32) {
 	for _, info := range c.ControlInfo {
-		controls := v.controls
-		switch {
-		case screenSource != 0 && info.SourceID == screenSource:
-			controls = v.screenControls
-		case strings.Contains(info.FmtParams, "KeyFrame=1"):
+		controls, keyFrames := v.controls, v.keyFrames
+		if screenSource != 0 && info.SourceID == screenSource {
+			controls, keyFrames = v.screenControls, v.screenKeyFrames
+		}
+		if strings.Contains(info.FmtParams, "KeyFrame=1") {
 			select {
-			case v.keyFrames <- struct{}{}:
+			case keyFrames <- struct{}{}:
 			default:
 			}
 		}
@@ -115,6 +117,10 @@ func (call *Call) ScreenControls() <-chan string {
 // camera for a keyframe.
 func (call *Call) KeyFrameRequests() <-chan struct{} {
 	return call.video.keyFrames
+}
+
+func (call *Call) ScreenKeyFrameRequests() <-chan struct{} {
+	return call.video.screenKeyFrames
 }
 
 // VideoState is what the bridge sends on the video lines of the call's
@@ -151,7 +157,7 @@ func (call *Call) SetVideo(ctx context.Context, video VideoState) error {
 	}
 	if apply := call.video.link("applyChannelParameters"); video.Camera && apply != "" {
 		caps, _ := json.Marshal(map[string]any{"maxVideoSendCapabilities": map[string]any{"caps": map[string]any{
-			"max-width": 3840, "max-height": 3840, "max-fps": 60, "max-streams": 3, "max-layers": 3,
+			"max-width": 3840, "max-height": 3840, "max-fps": teamsvideo.MaxFPS, "max-streams": 3, "max-layers": 3,
 			"sequence-number": call.video.nextRequestID(),
 		}}})
 		_, err := call.post(ctx, apply, newUUIDv4(), true, map[string]any{
@@ -179,26 +185,34 @@ func (call *Call) SetVideo(ctx context.Context, video VideoState) error {
 	return nil
 }
 
-// A subscription asks for up to 1080p60, the most the web client's tables
-// allow: frame size in macroblocks (its MAX_FS_1080P), frames per second in
-// hundredths, and the top of its table of macroblocks per second.
-var videoSubscription = map[string]any{"max-fs": 8160, "max-mbps": 520000, "max-fps": 6000, "profile-level-id": "64001f"}
+var cameraSubscription = map[string]any{"max-fs": 8160, "max-mbps": 520000, "max-fps": 100 * teamsvideo.MaxFPS, "profile-level-id": "64001f"}
 
-// SubscribeVideo asks Teams to forward a camera or screen share, by its
-// roster source ID or -1 for none, to the receive line mid, whose stream ID
-// Teams named in its offer. The web client sends this on its data channel
-// and falls back to the call leg's applyChannelParameters, as here.
-func (call *Call) SubscribeVideo(ctx context.Context, mid string, streamID uint32, source int64) error {
+// What Teams names for a share in its sender control: 3840x2160 at 30 frames a second.
+var screenSubscription = map[string]any{"max-fs": 32400, "max-mbps": 32400 * 30, "max-fps": 3000, "profile-level-id": "64001f"}
+
+type VideoSubscription struct {
+	Mid      string
+	StreamID uint32
+	Source   int64
+	Screen   bool
+}
+
+// SubscribeVideo asks Teams to forward sub.Source on line sub.Mid; a Source of -1 forwards nothing.
+func (call *Call) SubscribeVideo(ctx context.Context, sub VideoSubscription) error {
 	apply := call.video.link("applyChannelParameters")
 	if apply == "" {
 		return errors.New("teams named no link to subscribe to video")
 	}
+	subscription := cameraSubscription
+	if sub.Screen {
+		subscription = screenSubscription
+	}
 	param, _ := json.Marshal(map[string]any{"controlVideoStreaming": map[string]any{
 		"sequenceNumber": call.video.nextRequestID(),
-		"controlInfo":    map[string]any{"sourceId": source, "streamMsid": streamID, "fmtParams": []any{videoSubscription}},
+		"controlInfo":    map[string]any{"sourceId": sub.Source, "streamMsid": sub.StreamID, "fmtParams": []any{subscription}},
 	}})
 	_, err := call.post(ctx, apply, newUUIDv4(), true, map[string]any{
-		"applyChannelParameters": map[string]any{"multiChannelParameter": map[string]any{"mids": []string{mid}, "mediaParameter": string(param)}},
+		"applyChannelParameters": map[string]any{"multiChannelParameter": map[string]any{"mids": []string{sub.Mid}, "mediaParameter": string(param)}},
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("subscribe to video: %w", err)
