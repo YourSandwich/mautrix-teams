@@ -16,6 +16,7 @@
 package connector
 
 import (
+	"context"
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -66,8 +67,9 @@ func TestAlreadyBridged(t *testing.T) {
 
 func TestBackfillShowsCustomEmoji(t *testing.T) {
 	const custom = "thankyou;0-weu-d1-0123456789abcdef0123456789abcdef"
-	got := backfillReactionsFor(&msteams.Message{Reactions: []msteams.Reaction{{Type: custom, UserID: "8:orgid:00000000-0000-0000-0000-00000000000a"}}})
-	if len(got) != 1 || got[0].Emoji != ":thankyou:" || got[0].EmojiID != networkid.EmojiID(custom) {
+	client, _ := newEmojiTestClient(t, "", "")
+	got := client.backfillReactionsFor(context.Background(), &msteams.Message{Reactions: []msteams.Reaction{{Type: custom, UserID: "8:orgid:00000000-0000-0000-0000-00000000000a"}}})
+	if len(got) != 1 || got[0].Emoji != ":thankyou:" || got[0].EmojiID != networkid.EmojiID(custom) || got[0].ExtraContent != nil {
 		t.Errorf("backfilled reactions = %+v", got)
 	}
 }

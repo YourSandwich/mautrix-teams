@@ -715,6 +715,48 @@ func readAtMost(body io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+const maxCustomEmojiSize = 1 << 20
+
+func (c *Client) FetchCustomEmoji(ctx context.Context, objectID string) ([]byte, string, error) {
+	pattern := firstNonEmpty(c.cfg.Endpoints.CustomEmojiURL, DefaultCustomEmojiURL)
+	if pattern == "" {
+		return nil, "", ErrNoCustomEmojiURL
+	}
+	if !IsCustomEmojiID(objectID) {
+		return nil, "", fmt.Errorf("%w: %q", ErrCustomEmojiID, objectID)
+	}
+	var data []byte
+	err := c.withSkypeRetry(ctx, func(skype string) error {
+		var err error
+		data, _, err = c.fetchAMS(ctx, strings.ReplaceAll(pattern, "<id>", objectID), skype, maxCustomEmojiSize)
+		return err
+	})
+	if errors.Is(err, ErrTooLarge) {
+		return nil, "", fmt.Errorf("%w: over %d bytes", ErrCustomEmojiTooLarge, maxCustomEmojiSize)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	switch mimeType := http.DetectContentType(data); mimeType {
+	case "image/png", "image/gif", "image/jpeg", "image/webp":
+		return data, mimeType, nil
+	default:
+		return nil, "", fmt.Errorf("%w: %s", ErrCustomEmojiNotPicture, mimeType)
+	}
+}
+
+func IsCustomEmojiID(objectID string) bool {
+	if objectID == "" || len(objectID) > 128 {
+		return false
+	}
+	for _, c := range []byte(objectID) {
+		if !(c == '-' || c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) FetchSharedFile(ctx context.Context, f SharedFile) ([]byte, string, error) {
 	data, ctype, err := c.fetchSharePointFile(ctx, f)
 	if err == nil {

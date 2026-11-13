@@ -61,6 +61,8 @@ type TeamsConnector struct {
 	turnLock    sync.Mutex
 	turn        *teamsmedia.TURNServer
 	turnExpires time.Time
+
+	customEmoji customEmojiFetches
 }
 
 var _ bridgev2.NetworkConnector = (*TeamsConnector)(nil)

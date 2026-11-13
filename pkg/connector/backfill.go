@@ -135,11 +135,11 @@ func (t *TeamsClient) wrapBackfillMessage(ctx context.Context, portal *bridgev2.
 		},
 		ID:        teamsid.MakeMessageID(m.ThreadID, m.ID),
 		Timestamp: m.Created,
-		Reactions: backfillReactionsFor(m),
+		Reactions: t.backfillReactionsFor(ctx, m),
 	}
 }
 
-func backfillReactionsFor(m *msteams.Message) []*bridgev2.BackfillReaction {
+func (t *TeamsClient) backfillReactionsFor(ctx context.Context, m *msteams.Message) []*bridgev2.BackfillReaction {
 	if len(m.Reactions) == 0 {
 		return nil
 	}
@@ -148,15 +148,16 @@ func backfillReactionsFor(m *msteams.Message) []*bridgev2.BackfillReaction {
 		if r.UserID == "" || r.Type == "" {
 			continue
 		}
-		emoji := msteams.DecodeReactionKey(r.Type)
+		emoji, extra := t.reactionEmoji(ctx, r.Type)
 		out = append(out, &bridgev2.BackfillReaction{
 			Timestamp: r.Time,
 			Sender: bridgev2.EventSender{
 				Sender:      teamsid.MakeUserID(r.UserID),
 				SenderLogin: teamsid.MakeUserLoginID(r.UserID),
 			},
-			EmojiID: networkid.EmojiID(r.Type),
-			Emoji:   emoji,
+			EmojiID:      networkid.EmojiID(r.Type),
+			Emoji:        emoji,
+			ExtraContent: extra,
 		})
 	}
 	return out

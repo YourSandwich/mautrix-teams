@@ -1045,3 +1045,74 @@ func TestEditMessageImportance(t *testing.T) {
 		t.Errorf("tried %v", tried)
 	}
 }
+
+func TestFetchCustomEmoji(t *testing.T) {
+	const objectID = "0-weu-d1-0123456789abcdef0123456789abcdef"
+	png := func(size int) []byte {
+		return append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, size-8)...)
+	}
+	var requests int
+	var body []byte
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1/objects/"+objectID+"/views/emoji" || r.Header.Get("Authorization") != "skype_token skype-value" {
+			t.Errorf("request %s with %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	newClient := func(pattern string) *Client {
+		c, err := NewClient(ClientConfig{
+			UserMRI:    "8:orgid:me",
+			SkypeToken: "skype-value",
+			Endpoints:  Endpoints{AMSBase: srv.URL, CustomEmojiURL: pattern},
+			Logger:     zerolog.Nop(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	ctx := context.Background()
+	if _, _, err := newClient("").FetchCustomEmoji(ctx, objectID); !errors.Is(err, ErrNoCustomEmojiURL) || requests != 0 {
+		t.Errorf("no pattern: %v after %d requests", err, requests)
+	}
+	c := newClient(srv.URL + "/v1/objects/<id>/views/emoji")
+	for _, bad := range []string{"", "../../v1/users/me", "0-weu-d1-0123?x=1", strings.Repeat("a", 129)} {
+		if _, _, err := c.FetchCustomEmoji(ctx, bad); !errors.Is(err, ErrCustomEmojiID) || requests != 0 {
+			t.Errorf("id %q: %v after %d requests", bad, err, requests)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   []byte
+		want   error
+	}{
+		{"a picture at the cap", http.StatusOK, png(maxCustomEmojiSize), nil},
+		{"a picture over the cap", http.StatusOK, png(maxCustomEmojiSize + 1), ErrCustomEmojiTooLarge},
+		{"a page", http.StatusOK, []byte("<!DOCTYPE html><html></html>"), ErrCustomEmojiNotPicture},
+		{"a refusal", http.StatusForbidden, []byte("no"), nil},
+		{"no such object", http.StatusNotFound, nil, ErrNotFound},
+	} {
+		requests, status, body = 0, tc.status, tc.body
+		data, mimeType, err := c.FetchCustomEmoji(ctx, objectID)
+		switch {
+		case requests != 1:
+			t.Errorf("%s: %d requests", tc.name, requests)
+		case tc.status == http.StatusForbidden:
+			if err == nil {
+				t.Errorf("%s: no error", tc.name)
+			}
+		case tc.want != nil:
+			if !errors.Is(err, tc.want) || data != nil {
+				t.Errorf("%s: %v, %d bytes; want %v", tc.name, err, len(data), tc.want)
+			}
+		case err != nil || mimeType != "image/png" || len(data) != maxCustomEmojiSize:
+			t.Errorf("%s: %v, %s of %d bytes", tc.name, err, mimeType, len(data))
+		}
+	}
+}

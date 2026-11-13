@@ -19,6 +19,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"image"
@@ -28,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -58,7 +60,11 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 	case msteams.EventTypeTyping:
 		t.queueTypingEvent(ev)
 	case msteams.EventTypeReaction:
-		t.queueReactionSync(ev)
+		select {
+		case t.reactions <- ev:
+		default:
+			log.Warn().Msg("Reaction queue full; dropping a reaction update")
+		}
 	case msteams.EventTypeCall:
 		if ev.Message == nil {
 			return
@@ -87,13 +93,26 @@ func (t *TeamsClient) HandleTeamsEvent(ctx context.Context, ev msteams.Event) {
 	}
 }
 
-func (t *TeamsClient) queueReactionSync(ev msteams.Event) {
-	if sync := t.reactionSync(ev); sync != nil {
+const reactionQueueSize = 256
+
+func (t *TeamsClient) reactionLoop(ctx context.Context, handle func(context.Context, msteams.Event)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-t.reactions:
+			handle(ctx, ev)
+		}
+	}
+}
+
+func (t *TeamsClient) queueReactionSync(ctx context.Context, ev msteams.Event) {
+	if sync := t.reactionSync(ctx, ev); sync != nil {
 		t.Main.br.QueueRemoteEvent(t.UserLogin, sync)
 	}
 }
 
-func (t *TeamsClient) reactionSync(ev msteams.Event) *simplevent.ReactionSync {
+func (t *TeamsClient) reactionSync(ctx context.Context, ev msteams.Event) *simplevent.ReactionSync {
 	if ev.Message == nil || ev.ThreadID == "" || ev.Message.ID == "" {
 		return nil
 	}
@@ -109,7 +128,7 @@ func (t *TeamsClient) reactionSync(ev msteams.Event) *simplevent.ReactionSync {
 			entry = &bridgev2.ReactionSyncUser{}
 			users[uid] = entry
 		}
-		emoji := msteams.DecodeReactionKey(r.Type)
+		emoji, extra := t.reactionEmoji(ctx, r.Type)
 		entry.Reactions = append(entry.Reactions, &bridgev2.BackfillReaction{
 			Timestamp: r.Time,
 			Sender: bridgev2.EventSender{
@@ -117,8 +136,9 @@ func (t *TeamsClient) reactionSync(ev msteams.Event) *simplevent.ReactionSync {
 				SenderLogin: teamsid.MakeUserLoginID(r.UserID),
 				IsFromMe:    r.UserID == t.UserMRI,
 			},
-			EmojiID: networkid.EmojiID(r.Type),
-			Emoji:   emoji,
+			EmojiID:      networkid.EmojiID(r.Type),
+			Emoji:        emoji,
+			ExtraContent: extra,
 		})
 	}
 	return &simplevent.ReactionSync{
@@ -129,6 +149,113 @@ func (t *TeamsClient) reactionSync(ev msteams.Event) *simplevent.ReactionSync {
 		TargetMessage: targetID,
 		Reactions:     &bridgev2.ReactionSyncData{Users: users, HasAllUsers: true},
 	}
+}
+
+func customEmojiPictureKey(objectID string) database.Key {
+	return database.Key("custom_emoji_picture:" + objectID)
+}
+
+func (t *TeamsClient) reactionEmoji(ctx context.Context, key string) (string, map[string]any) {
+	text := msteams.DecodeReactionKey(key)
+	name, objectID, custom := strings.Cut(key, ";")
+	if !custom || name == "" || !msteams.IsCustomEmojiID(objectID) {
+		return text, nil
+	}
+	picture := t.customEmojiPicture(ctx, key, objectID)
+	if picture == "" {
+		return text, nil
+	}
+	return string(picture), map[string]any{"com.beeper.reaction.shortcode": text}
+}
+
+type customEmojiFetches struct {
+	lock     sync.Mutex
+	inFlight map[string]chan struct{}
+	failed   map[string]bool
+}
+
+const maxFailedCustomEmoji = 1024
+
+func (f *customEmojiFetches) begin(objectID string) (fetch bool, wait <-chan struct{}) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if f.failed[objectID] {
+		return false, nil
+	}
+	if done, ok := f.inFlight[objectID]; ok {
+		return false, done
+	}
+	if f.inFlight == nil {
+		f.inFlight = map[string]chan struct{}{}
+	}
+	f.inFlight[objectID] = make(chan struct{})
+	return true, nil
+}
+
+func (f *customEmojiFetches) end(objectID string, failed bool) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if failed {
+		if f.failed == nil || len(f.failed) >= maxFailedCustomEmoji {
+			f.failed = map[string]bool{}
+		}
+		f.failed[objectID] = true
+	}
+	if done, ok := f.inFlight[objectID]; ok {
+		close(done)
+		delete(f.inFlight, objectID)
+	}
+}
+
+func (t *TeamsClient) customEmojiPicture(ctx context.Context, key, objectID string) id.ContentURIString {
+	fetches := &t.Main.customEmoji
+	for {
+		fetch, wait := fetches.begin(objectID)
+		switch {
+		case fetch:
+			picture, failed := t.fetchCustomEmojiPicture(ctx, key, objectID)
+			fetches.end(objectID, failed)
+			return picture
+		case wait == nil:
+			return ""
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ""
+		}
+	}
+}
+
+const customEmojiTimeout = 5 * time.Second
+
+func (t *TeamsClient) fetchCustomEmojiPicture(ctx context.Context, key, objectID string) (picture id.ContentURIString, failed bool) {
+	kv := t.Main.br.DB.KV
+	if stored := id.ContentURIString(kv.Get(ctx, customEmojiPictureKey(objectID))); stored != "" {
+		return stored, false
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, customEmojiTimeout)
+	defer cancel()
+	data, mimeType, err := t.Client.FetchCustomEmoji(fetchCtx, objectID)
+	if err == nil {
+		name, _, _ := strings.Cut(key, ";")
+		if picture, _, err = t.Main.br.Bot.UploadMedia(fetchCtx, "", data, name, mimeType); err != nil {
+			err = fmt.Errorf("upload: %w", err)
+		}
+	}
+	switch {
+	case err == nil:
+		kv.Set(ctx, customEmojiPictureKey(objectID), string(picture))
+		return picture, false
+	case ctx.Err() != nil:
+		return "", false
+	}
+	level := zerolog.WarnLevel
+	if errors.Is(err, msteams.ErrNoCustomEmojiURL) {
+		level = zerolog.DebugLevel
+	}
+	zerolog.Ctx(ctx).WithLevel(level).Err(err).Str("emoji_key", key).Msg("Showing an organisation's own emoji as its name")
+	return "", true
 }
 
 func (t *TeamsClient) queueChatUpdate(ev msteams.Event) {

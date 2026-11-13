@@ -30,6 +30,11 @@ var (
 	ErrTooLarge       = errors.New("msteams: download over its size limit")
 	ErrHTTPRedirect   = errors.New("msteams: redirect from https to http")
 	ErrRedirectLoop   = errors.New("msteams: stopped after 10 redirects")
+
+	ErrNoCustomEmojiURL      = errors.New("msteams: no url known for an organisation's own emoji")
+	ErrCustomEmojiID         = errors.New("msteams: not an object id of an organisation's own emoji")
+	ErrCustomEmojiTooLarge   = errors.New("msteams: picture of an organisation's own emoji too large")
+	ErrCustomEmojiNotPicture = errors.New("msteams: an organisation's own emoji is not a picture")
 )
 
 func IsCredentialError(err error) bool {

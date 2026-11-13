@@ -266,6 +266,9 @@ func (t *TeamsClient) teamsReactionKey(ctx context.Context, msg *bridgev2.Matrix
 	if err != nil {
 		return "", fmt.Errorf("read the reactions to the message: %w", err)
 	}
+	if strings.HasPrefix(msg.Content.RelatesTo.Key, "mxc://") {
+		return t.pictureReactionKey(ctx, reactions, msg.Content.RelatesTo.Key)
+	}
 	catalog := msteams.TeamsReactionKey(msg.Content.RelatesTo.Key)
 	shown := variationselector.Remove(msg.Content.RelatesTo.Key)
 	var found string
@@ -287,6 +290,18 @@ func (t *TeamsClient) teamsReactionKey(ctx context.Context, msg *bridgev2.Matrix
 		return catalog, nil
 	}
 	return found, nil
+}
+
+var errUnknownPictureReaction = errors.New("no organisation's emoji on the message has this picture")
+
+func (t *TeamsClient) pictureReactionKey(ctx context.Context, reactions []*database.Reaction, picture string) (string, error) {
+	for _, r := range reactions {
+		key := string(r.EmojiID)
+		if _, objectID, custom := strings.Cut(key, ";"); custom && t.Main.br.DB.KV.Get(ctx, customEmojiPictureKey(objectID)) == picture {
+			return key, nil
+		}
+	}
+	return "", errUnknownPictureReaction
 }
 
 func (t *TeamsClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {

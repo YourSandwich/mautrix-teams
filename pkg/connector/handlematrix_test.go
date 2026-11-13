@@ -213,6 +213,8 @@ func TestReactionToBridgedReaction(t *testing.T) {
 		}
 	}
 	client := &TeamsClient{Main: tc, UserMRI: "8:orgid:00000000-0000-0000-0000-00000000000b"}
+	const picture = "mxc://example.com/thankyou"
+	br.DB.KV.Set(ctx, customEmojiPictureKey("0-weu-d1-0123456789abcdef0123456789abcdef"), picture)
 	react := func(target *database.Message, key string) (networkid.EmojiID, error) {
 		resp, err := client.PreHandleMatrixReaction(ctx, &bridgev2.MatrixReaction{
 			MatrixEventBase: bridgev2.MatrixEventBase[*event.ReactionEventContent]{
@@ -224,7 +226,7 @@ func TestReactionToBridgedReaction(t *testing.T) {
 		return resp.EmojiID, err
 	}
 	shown := func(key string) string { return variationselector.Add(msteams.DecodeReactionKey(key)) }
-	var target *database.Message
+	var target, pictured *database.Message
 	for i, c := range []struct {
 		name   string
 		stored []string
@@ -232,6 +234,7 @@ func TestReactionToBridgedReaction(t *testing.T) {
 		want   string
 	}{
 		{"an organisation's emoji", []string{custom}, shown(custom), custom},
+		{"an organisation's emoji shown as its picture", []string{"2603_snowman", custom}, picture, custom},
 		{"a glyph the catalog keys otherwise", []string{"2603_snowman"}, shown("2603_snowman"), "2603_snowman"},
 		{"the catalog's key", []string{"like"}, shown("like"), "like"},
 		{"a stored glyph with its variation selector", []string{"rainbowheart2"}, "❤", "rainbowheart2"},
@@ -257,6 +260,12 @@ func TestReactionToBridgedReaction(t *testing.T) {
 		if got, err := react(target, c.click); err != nil || got != networkid.EmojiID(c.want) {
 			t.Errorf("%s: adding %q sends %q (err %v), want %q", c.name, c.click, got, err, c.want)
 		}
+		if c.click == picture {
+			pictured = target
+		}
+	}
+	if got, err := react(pictured, "mxc://example.com/other"); !errors.Is(err, errUnknownPictureReaction) {
+		t.Errorf("adding a picture no reaction on the message shows sends %q (err %v), want %v", got, err, errUnknownPictureReaction)
 	}
 	if err = db.Close(); err != nil {
 		t.Fatal(err)

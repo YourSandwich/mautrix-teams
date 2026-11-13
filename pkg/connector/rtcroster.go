@@ -48,24 +48,107 @@ const maxCallMembers = 24
 
 // Audio levels (RFC 6464, -dBov) sent with the meeting audio, which LiveKit's
 // speaker detection reads: loud on the tiles of whoever is audible, silent on
-// the holder's otherwise.
+// the others.
 const (
 	speakingLevel uint8 = 10
 	silentLevel   uint8 = 127
 )
 
-// speakerTrack is a tile's audio track. A tile gets packets only while its
-// speaker is audible, so each keeps its own gapless sequence numbers; only the
-// audio pump writes to it.
-type speakerTrack struct {
-	track *lksdk.LocalTrack
-	seq   uint16
+// opusSilence is a 20 ms Opus frame of silence.
+var opusSilence = []byte{0xf8, 0xff, 0xfe}
+
+type rtpWriter interface {
+	WriteRTP(pkt *rtp.Packet, opts *lksdk.SampleWriteOptions) error
 }
+
+// Only the call's one audio pump writes to it, so seq and tail need no lock.
+type speakerTrack struct {
+	track rtpWriter
+	seq   uint16
+	tail  int
+}
+
+// One frame ends a voice in silence, not in the browser's concealment, which smears it;
+// in an offline measurement more gained nothing.
+const silenceTail = 1
 
 func (s *speakerTrack) write(pkt *rtp.Packet, level uint8) {
 	pkt.SequenceNumber = s.seq
 	s.seq++
 	_ = s.track.WriteRTP(pkt, &lksdk.SampleWriteOptions{AudioLevel: &level})
+}
+
+type callSpeakers struct {
+	holder   *speakerTrack
+	bySource map[uint32]*speakerTrack
+	members  []*speakerTrack
+}
+
+func newCallSpeakers(roster []msteams.Participant, members map[string]*callMember, holder string, holderVoice *speakerTrack) *callSpeakers {
+	speakers := &callSpeakers{holder: holderVoice, bySource: make(map[uint32]*speakerTrack, len(members)+1)}
+	for _, p := range roster {
+		switch {
+		case p.AudioSource == 0:
+		case p.MRI == holder:
+			speakers.bySource[p.AudioSource] = holderVoice
+		case members[p.MRI] != nil:
+			voice := members[p.MRI].voice
+			speakers.bySource[p.AudioSource] = voice
+			if !slices.Contains(speakers.members, voice) {
+				speakers.members = append(speakers.members, voice)
+			}
+		}
+	}
+	return speakers
+}
+
+func (s *callSpeakers) names(tile *speakerTrack, audible []uint32) bool {
+	for _, source := range audible {
+		if s.bySource[source] == tile {
+			return true
+		}
+	}
+	return false
+}
+
+// Teams sends one mix; playing it on the speaker's tile makes per-person volume and mute work.
+type mixRouter struct {
+	carrier uint32
+}
+
+func (r *mixRouter) send(pkt *rtp.Packet, audible []uint32, speakers *callSpeakers) {
+	target := speakers.holder
+	if tile := speakers.bySource[r.carrier]; tile != nil && slices.Contains(audible, r.carrier) {
+		target = tile
+	} else {
+		r.carrier = 0
+		for _, source := range audible {
+			if tile := speakers.bySource[source]; tile != nil {
+				r.carrier, target = source, tile
+				break
+			}
+		}
+	}
+	play := func(tile *speakerTrack) {
+		lit := speakers.names(tile, audible)
+		level := silentLevel
+		if lit {
+			level = speakingLevel
+		}
+		switch {
+		case tile == target:
+			tile.tail = silenceTail
+			tile.write(pkt, level)
+		case lit || tile.tail > 0:
+			tile.tail = max(tile.tail-1, 0)
+			// Each track sets its own header extensions on the packet.
+			tile.write(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pkt.PayloadType, Timestamp: pkt.Timestamp}, Payload: opusSilence}, level)
+		}
+	}
+	play(speakers.holder)
+	for _, tile := range speakers.members {
+		play(tile)
+	}
 }
 
 func publishVoice(room *lksdk.Room) (*speakerTrack, *lksdk.LocalTrackPublication, error) {
@@ -171,17 +254,7 @@ func (t *TeamsClient) followRoster(bc *bridgedCall, call *msteams.Call, live *li
 			}
 		}
 		t.showLobby(bc, call.Lobby(), call.CanAdmit(), lobby)
-		speakers := make(map[uint32]*speakerTrack, len(members)+1)
-		for _, p := range roster {
-			switch {
-			case p.AudioSource == 0:
-			case members[p.MRI] != nil:
-				speakers[p.AudioSource] = members[p.MRI].voice
-			case p.MRI == holder:
-				speakers[p.AudioSource] = bc.holderVoice
-			}
-		}
-		bc.speakers.Store(&speakers)
+		bc.speakers.Store(newCallSpeakers(roster, members, holder, bc.holderVoice))
 		t.liveCallsLock.Lock()
 		live.shown = slices.Collect(maps.Keys(members))
 		t.liveCallsLock.Unlock()

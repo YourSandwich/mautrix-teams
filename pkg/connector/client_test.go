@@ -419,7 +419,7 @@ func newStoredLogin(t *testing.T, f *fakeTeams, meta *UserLoginMetadata) (*Teams
 	ul := &bridgev2.UserLogin{UserLogin: login, Bridge: br}
 	ul.BridgeState = br.NewBridgeStateQueue(ul)
 	t.Cleanup(ul.BridgeState.Destroy)
-	client := &TeamsClient{Main: &TeamsConnector{}, Client: teams, UserLogin: ul}
+	client := &TeamsClient{Main: &TeamsConnector{}, Client: teams, UserLogin: ul, reactions: make(chan msteams.Event, reactionQueueSize)}
 	ul.Client = client
 	t.Cleanup(client.Disconnect)
 	return client, br, states

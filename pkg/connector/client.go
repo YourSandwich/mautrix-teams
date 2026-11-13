@@ -56,6 +56,7 @@ type TeamsClient struct {
 	stopPump     context.CancelFunc
 	connecting   chan struct{}
 	disconnected bool
+	reactions    chan msteams.Event
 
 	liveCallsLock sync.Mutex
 	liveCalls     map[id.RoomID]*liveCall
@@ -94,6 +95,7 @@ func (tc *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		UserLogin: login,
 		Client:    client,
 		UserMRI:   meta.UserMRI,
+		reactions: make(chan msteams.Event, reactionQueueSize),
 	}
 	return nil
 }
@@ -164,6 +166,7 @@ func (t *TeamsClient) stopLoops() {
 func (t *TeamsClient) start(ctx context.Context) {
 	t.persistTokens(ctx)
 	go t.eventLoop(ctx)
+	go t.reactionLoop(ctx, t.queueReactionSync)
 	t.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	// Watched only once connected, so no connected state follows a refusal.
 	go t.reportRefusal(ctx, t.Client.CredentialsRefused(), t.UserLogin.BridgeState.Send)

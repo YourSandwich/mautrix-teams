@@ -33,6 +33,8 @@ const (
 	DefaultMTBase      = "https://teams.microsoft.com/api/mt/part/emea-03"
 	DefaultTrouterBase = "https://go.trouter.teams.microsoft.com/v4"
 	DefaultAMSBase     = "https://teams.microsoft.com/api/amsMTProd"
+	// Not known yet, so an organisation's own emoji stays text.
+	DefaultCustomEmojiURL = ""
 
 	// AMS's platform-id regex accepts only SkypeOfficialClient/<build>/<ver>.
 	// Other values (Teams/*, Mozilla/*, SkypeiOS/*, SkypeTeams/*) get a 400.
@@ -58,12 +60,13 @@ type ClientConfig struct {
 }
 
 type Endpoints struct {
-	TokenURL    string
-	AuthzURL    string
-	ChatSvcBase string
-	TrouterBase string
-	MTBase      string
-	AMSBase     string
+	TokenURL       string
+	AuthzURL       string
+	ChatSvcBase    string
+	TrouterBase    string
+	MTBase         string
+	AMSBase        string
+	CustomEmojiURL string
 }
 
 type Token struct {
