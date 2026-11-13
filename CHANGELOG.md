@@ -6,6 +6,62 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Tracks mautrix-go `v0.32.0`.
+
+### Added
+
+- In meetings, each Teams person's voice plays on their own tile in Element
+  Call while they speak, and is experimental: per-person volume and "mute
+  for me" work, and people talking at once share one tile.
+
+### Fixed
+
+- Screen shares from Matrix larger than 1080p (1440p, ultrawide, 4K) reach
+  Teams; before, such a share could stay black there.
+- A still screen shared from Matrix to Teams stays sharp instead of blurring
+  every few seconds, and sharpens sooner after the share starts, after
+  someone joins in Teams or after Teams changes its bit rate.
+- A shared screen that fits the size Teams takes is sent without rescaling,
+  and video sent from Matrix to Teams has less delay.
+- A Teams screen share is requested at the size and rate Teams names for
+  shares, up to 3840x2160 at 30 frames a second.
+- Teams participants joining, leaving, muting and unmuting show in bridged
+  calls again; since early November they no longer did.
+- Turning a Matrix camera off and on again in a bridged call brings the live
+  picture back in Teams within seconds, without replaying the old picture
+  first.
+- A screen share or camera sent from Matrix no longer freezes for good when
+  its RTP clock wraps, about every 13 hours of sending.
+- A broken picture sent to a meeting recovers as soon as Teams asks for a
+  fresh one.
+- If the video encoder stops during a share or call, the bridge starts a new
+  one; if that keeps failing, the video ends in Teams after a few restarts
+  instead of freezing or flickering for the rest of the call.
+- Reactions with an organisation's own emoji show as `:name:` in Matrix
+  instead of a raw key. Adding from Matrix a reaction that is already on a
+  message adds that same reaction in Teams, an organisation's own emoji
+  included.
+- Files sent from Matrix without a caption are posted the way the Teams web
+  client posts them, with an empty message body (found in
+  `yawks/mautrix-teams`).
+- A shared file that SharePoint answers with a sign-in or viewer page is
+  posted as a link instead of as that page under the file's name (found in
+  `yawks/mautrix-teams`).
+- Attachments over 64 MiB and shared files over 256 MiB are reported as not
+  downloadable instead of arriving cut short.
+- If Teams can't be reached when the bridge starts, the login keeps trying on
+  its own instead of staying offline until a restart (found in
+  `yawks/mautrix-teams`). A sign-in service that answers with a server error
+  or "too many requests" at start still leaves the login offline until a
+  restart.
+- A sign-in Microsoft refuses asks you to log in again, instead of being
+  tried again every few seconds while the login still shows as connected.
+
+### Security
+
+- The Teams media token is no longer sent to the media host over plain http
+  when a message links an http address there.
+
 ## [31.4] - 2026-09-30
 
 ### Added

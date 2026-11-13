@@ -1026,8 +1026,10 @@ paths:
       summary: Add a reaction (or mark a feed item read)
       description: |
         `key` is the Teams reaction key: a legacy short name (`like`, `heart`, ...) or a
-        `<hex codepoint>_<name>` id from the Teams emoji catalog. Emoji missing from the catalog are
-        sent as the raw glyph. The reaction arrives back as a Trouter `MessageUpdate`.
+        `<hex codepoint>_<name>` id from the Teams emoji catalog. A Matrix reaction that shows the same
+        as a reaction already on the message sends that reaction's key, an organisation's own emoji
+        included; otherwise the catalog's key, and emoji missing from the catalog are sent as the raw
+        glyph. The reaction arrives back as a Trouter `MessageUpdate`.
 
         With `name=isread` Squads sends `{"isread":"true"}` to mark an item of the activity feed
         (`48:notifications`) read.
@@ -1059,6 +1061,7 @@ paths:
       x-evidence:
         - "pkg/msteams/messages.go:AddReaction"
         - "pkg/msteams/messages.go:TeamsReactionKey"
+        - "pkg/connector/handlematrix.go:TeamsClient.teamsReactionKey"
         - "Squads@f977552 src/main.rs:2837-2842"
         - "Squads@f977552 src/main.rs:2054-2066"
     delete:
@@ -3822,7 +3825,7 @@ paths:
         '101':
           description: Switching Protocols; frames as in `x-websocket-frames`.
         default:
-          description: Dial failure; the reconnect loop starts over from `trouterAllocate` after 5 s.
+          description: Dial failure; the reconnect loop starts over from `trouterAllocate` after its wait (5 s, doubling with each try to 5 min).
       x-bridge-usage: used
       x-evidence:
         - "pkg/msteams/trouter.go:trouterDial"
@@ -3937,8 +3940,11 @@ paths:
             requests (`Trouter-Timeout` 12295-12299) and about 117 s for NotificationHub pushes.
 
             When `headers.X-Microsoft-Skype-Content-Encoding` is `gzip`, `body` is base64 of gzip; the
-            captures show it on `call/acceptance`, `conversationUpdate` and `rosterUpdate` only. The
-            bridge dispatches on `url`, in this order:
+            captures show it on `call/acceptance`, `conversationUpdate` and `rosterUpdate` only. Since
+            2026-11-03 `rosterUpdate` bodies came as base64 of gzip without that header under that name
+            (observed), so the bridge goes by the body: one starting with `H4sI` (base64 of gzip's
+            `1f 8b 08`; no JSON starts with `H`) is unpacked, up to 8 MiB, and dropped if it does not
+            unpack. The bridge dispatches on `url`, in this order:
 
             | `url` match | Body | Bridge handling |
             |---|---|---|
@@ -4245,7 +4251,11 @@ paths:
         - name: ack
           direction: server-to-client
           form: '6:<n>::[+<json>]'
-          description: Acknowledgement of a client `5:<n>+::` frame (`6:::<n>+[]`, `6:::<n>+["pong"]`). Ignored.
+          description: |
+            Acknowledgement of a client `5:<n>+::` frame (`6:::<n>+[]`, `6:::<n>+["pong"]`). The pong
+            to a ping shows the session came up and starts the reconnect wait over at 5 s, as a request
+            does; the other acks are ignored, and so are Trouter's events, which can come in the round
+            trip of `user.authenticate`.
           x-bridge-usage: used
           x-evidence:
             - "pkg/msteams/trouter.go:handleTrouterFrame"
@@ -7578,7 +7588,10 @@ components:
       properties:
         key:
           type: string
-          description: Reaction key (legacy short name or `<hex>_<name>`).
+          description: |
+            Reaction key: a legacy short name, `<hex>_<name>`, or an organisation's own emoji as
+            `<name>;<object id>` (observed; the id has the shape of an AMS object id). The bridge shows
+            the last in Matrix as `:<name>:` and keeps the whole key as the reaction's id.
         users:
           type: array
           items:
@@ -8672,8 +8685,8 @@ components:
           additionalProperties:
             type: string
           description: |
-            Relayed request headers. The bridge reads `X-Microsoft-Skype-Content-Encoding`. Seen in
-            captures and purple-teams' sample: `Host`, `User-Agent` (`ConversationService/...`,
+            Relayed request headers. The bridge reads those it echoes in its answer to `call/acceptance`.
+            Seen in captures and purple-teams' sample: `Host`, `User-Agent` (`ConversationService/...`,
             `CallController/...`, `Skype-NotificationHub/...`, `Microsoft.Skype.Presence.App/1.0`),
             `Content-Type`, `traceparent`, `X-Microsoft-Skype-Chain-ID`, `X-Microsoft-Skype-Message-ID`,
             `X-Microsoft-Skype-Original-Message-ID`, `X-Microsoft-Skype-Tenant-Id`, `X-CallingProxy`,
@@ -8681,7 +8694,9 @@ components:
             `Trouter-Timeout`, `Trouter-TimeoutMs` and `__RequestTunnelId__`.
         body:
           type: string
-          description: The service's request body as a string; base64 of gzip when the encoding header says `gzip`.
+          description: |
+            The service's request body as a string; base64 of gzip when the encoding header says `gzip`,
+            and on `rosterUpdate` also without it. Base64 of gzip starts with `H4sI`.
       x-evidence:
         - "pkg/msteams/trouter.go:trouterRequest"
         - "purple-teams@f7eb519 teams_trouter.c:167-168"

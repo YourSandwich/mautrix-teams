@@ -71,6 +71,7 @@ participant's camera shows in Element Call.
 | Meeting camera video (opt-in)                 | yes             | yes             |
 | Meeting screen share (opt-in)                 | yes             | yes             |
 | Raised hands and mute in meetings             | yes             | yes             |
+| Each Teams voice on its own tile (meetings)   | -               | experimental    |
 | Upcoming meeting notice (opt-in)              | -               | yes             |
 | Meeting transcripts (after the meeting)       | -               | yes             |
 | Join any meeting by link or code              | yes             | -               |
@@ -244,13 +245,16 @@ same one Element Call itself needs:
 ways. Video Element Call sends as VP8 or VP9 (its default) is
 re-encoded to H.264 with ffmpeg, which needs the `libx264` encoder and costs
 CPU per stream. LiveKit must allow H.264: list `video/h264` next to
-`video/vp8` in its `room.enabled_codecs`. Teams takes at most 1080p60 both
-ways, so larger video reaches Teams scaled down. Element Call sends cameras
+`video/vp8` in its `room.enabled_codecs`. Element Call sends cameras
 at up to 720p and screen shares at up to 1080p unless its `media_quality`
 setting raises that. `calls.mirror_camera` sends
 cameras to Teams flipped left to right.
 
 Raised hands and mute go both ways.
+
+In meetings, each Teams person's voice plays on their own tile in Element
+Call while they speak, so per-person volume and "mute for me" work. People
+talking at once share one tile: Teams sends one mixed stream.
 
 `join-meeting <link>` shows any Teams meeting as a call: in the room of its
 chat when the bridge has one, otherwise in a room of its own. `create-meeting
