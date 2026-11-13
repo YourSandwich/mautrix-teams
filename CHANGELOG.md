@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [32.0] - 2026-11-13
+
 Tracks mautrix-go `v0.32.0`.
 
 ### Added
