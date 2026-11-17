@@ -188,8 +188,26 @@ func (tc *TeamsConnector) Start(ctx context.Context) error {
 			mc.EventProcessor.On(matrixrtc.NotificationEvent, tc.handleCallRing)
 			mc.EventProcessor.On(matrixrtc.DeclineEvent, tc.handleCallDecline)
 		}
+	} else {
+		tc.disableAppserviceFeatures(ctx)
 	}
 	return nil
+}
+
+// disableAppserviceFeatures turns off what needs the appservice Matrix
+// connector and its homeserver: Element Call (MatrixRTC state events, OpenID,
+// TURN) and ghost presence. Under another bridgev2.MatrixConnector the bridge
+// then runs as a chat bridge instead of failing at each call or presence
+// update.
+func (tc *TeamsConnector) disableAppserviceFeatures(ctx context.Context) {
+	if tc.Config.Calls.ElementCall || tc.Config.Presence.SyncTeamsPresence {
+		zerolog.Ctx(ctx).Info().
+			Bool("element_call", tc.Config.Calls.ElementCall).
+			Bool("sync_teams_presence", tc.Config.Presence.SyncTeamsPresence).
+			Msg("Matrix connector is not the appservice one: Element Call and Teams presence are off")
+	}
+	tc.Config.Calls.ElementCall = false
+	tc.Config.Presence.SyncTeamsPresence = false
 }
 
 func (tc *TeamsConnector) currentNetworkIcon() id.ContentURIString {

@@ -16,9 +16,11 @@
 package connector
 
 import (
+	"context"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-teams/pkg/msteams"
@@ -53,5 +55,22 @@ func TestPresenceSyncOffByDefault(t *testing.T) {
 	}
 	if cfg.Presence.SyncTeamsPresence {
 		t.Error("presence sync must be opt-in")
+	}
+}
+
+func TestStartWithoutAppserviceTurnsOffCallsAndPresence(t *testing.T) {
+	tc := &TeamsConnector{
+		br:     &bridgev2.Bridge{Matrix: fakeMatrix{}},
+		Config: loadConfig(t, "calls: {element_call: true}\npresence: {sync_teams_presence: true}"),
+	}
+	if !tc.Config.Calls.ElementCall || !tc.Config.Presence.SyncTeamsPresence {
+		t.Fatal("config did not turn calls and presence on")
+	}
+	if err := tc.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if tc.Config.Calls.ElementCall || tc.Config.Presence.SyncTeamsPresence {
+		t.Errorf("element_call %v, sync_teams_presence %v; want both off without the appservice connector",
+			tc.Config.Calls.ElementCall, tc.Config.Presence.SyncTeamsPresence)
 	}
 }
