@@ -88,7 +88,7 @@ func (tc *TeamsConnector) turnServer(ctx context.Context) *teamsmedia.TURNServer
 	if !ok {
 		return nil
 	}
-	resp, err := bot.Matrix.TurnServer(ctx)
+	resp, err := bot.Matrix().TurnServer(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to get TURN credentials from the homeserver")
 		return nil
@@ -231,7 +231,7 @@ func (t *TeamsClient) showLiveMeeting(ctx context.Context, portal *bridgev2.Port
 		if !ok {
 			return nil, errors.New("bridge bot has no appservice intent")
 		}
-		intent, holder = bot.Matrix, ""
+		intent, holder = bot.Matrix(), ""
 	} else if intent, err = t.callGhost(ctx, portal.MXID, holder); err != nil {
 		return nil, err
 	}
@@ -283,7 +283,8 @@ func (t *TeamsClient) startCallFromMatrix(ctx context.Context, roomID id.RoomID)
 	if err != nil {
 		return nil, err
 	}
-	member, err := matrixrtc.Join(ctx, intent.Matrix, roomID, intent.Matrix.UserID, ghostCallDevice, transport)
+	ghost := intent.Matrix()
+	member, err := matrixrtc.Join(ctx, ghost, roomID, ghost.UserID, ghostCallDevice, transport)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +292,7 @@ func (t *TeamsClient) startCallFromMatrix(ctx context.Context, roomID id.RoomID)
 		member:   member,
 		meeting:  &msteams.LiveMeeting{TenantID: chat.Meeting.TenantID, OrganizerID: chat.Meeting.OrganizerID},
 		threadID: threadID,
-		ghost:    intent.Matrix,
+		ghost:    ghost,
 	}), nil
 }
 

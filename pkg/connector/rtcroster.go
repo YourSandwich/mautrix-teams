@@ -198,7 +198,7 @@ func (t *TeamsClient) callGhost(ctx context.Context, roomID id.RoomID, mri strin
 	if err := intent.EnsureJoined(ctx, roomID); err != nil {
 		return nil, err
 	}
-	return intent.Matrix, nil
+	return intent.Matrix(), nil
 }
 
 func (t *TeamsClient) connectLiveKit(ctx context.Context, intent *appservice.IntentAPI, roomID id.RoomID, transport matrixrtc.Transport, callbacks *lksdk.RoomCallback, opts ...lksdk.ConnectOption) (*lksdk.Room, error) {
