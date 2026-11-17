@@ -183,3 +183,21 @@ func TestRateLimitedRequestIsRetried(t *testing.T) {
 		t.Error("a minute's Retry-After should give up")
 	}
 }
+
+func TestStatusErrorKeepsItsText(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"errorCode":"TaskCanceled"}`))
+		}))
+		err := newTestClient(t).doJSON(context.Background(), "GET", srv.URL+"/x", AuthNone, nil, nil)
+		srv.Close()
+		want := fmt.Sprintf(`msteams: GET %s/x: %d {"errorCode":"TaskCanceled"}`, srv.URL, status)
+		if err == nil || err.Error() != want || IsServerError(err) != (status >= 500) || IsServerError(fmt.Errorf("wrapped: %w", err)) != (status >= 500) {
+			t.Errorf("status %d: %v, server error %v", status, err, IsServerError(err))
+		}
+	}
+	if IsServerError(errors.New("msteams: GET x: 500 y")) {
+		t.Error("a plain error with a 500 in its text is not a server answer")
+	}
+}

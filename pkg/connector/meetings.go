@@ -28,47 +28,124 @@ import (
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
 )
 
-const upcomingWindow = 14 * 24 * time.Hour
+const (
+	upcomingWindow = 14 * 24 * time.Hour
+	calendarDay    = 24 * time.Hour
+	// 14 failing days at the 15 s Teams takes to fail one fit; 14 client timeouts do not.
+	dayByDayBound = 5 * time.Minute
+)
+
+// After a pass Teams answered nothing of, the next comes sooner, then hourly again.
+var upcomingRetries = []time.Duration{2 * time.Minute, 10 * time.Minute}
+
+func (t *TeamsClient) upcomingMeetingsLoop(ctx context.Context) {
+	upcomingLoop(ctx, t.Client.CalendarChanged(), time.After, t.syncUpcomingMeetings)
+}
 
 // The first pass waits for the startup sync to create new meeting rooms.
-func (t *TeamsClient) upcomingMeetingsLoop(ctx context.Context) {
-	wait := time.NewTimer(time.Minute)
-	defer wait.Stop()
+func upcomingLoop(ctx context.Context, changed <-chan struct{}, after func(time.Duration) <-chan time.Time, sync func(context.Context) bool) {
+	wait, failed := time.Minute, 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-wait.C:
-		case <-t.Client.CalendarChanged():
+		case <-after(wait):
+		case <-changed:
 		}
-		t.syncUpcomingMeetings(ctx)
-		wait.Reset(time.Hour)
+		wait = time.Hour
+		if sync(ctx) {
+			failed = 0
+		} else if failed < len(upcomingRetries) {
+			wait = upcomingRetries[failed]
+			failed++
+		}
 	}
 }
 
-func (t *TeamsClient) syncUpcomingMeetings(ctx context.Context) {
+func (t *TeamsClient) syncUpcomingMeetings(ctx context.Context) bool {
 	log := zerolog.Ctx(ctx)
 	now := time.Now()
-	events, err := t.Client.ListCalendar(ctx, now, now.Add(upcomingWindow))
-	if err != nil {
-		log.Err(err).Msg("Failed to fetch the Teams calendar")
-		return
+	events, gap, ok := fetchUpcoming(ctx, t.Client.ListCalendar, now, dayByDayBound)
+	if !ok {
+		return false
 	}
 	next := nextOccurrences(events, now)
 	portals, err := t.Main.br.GetChildPortals(ctx, teamsid.MakeMeetingsPortalKey(t.UserLogin.ID, t.splitPortals()))
 	if err != nil {
 		log.Err(err).Msg("Failed to list meeting rooms")
-		return
+		return true
 	}
-	log.Debug().Int("events", len(events)).Int("upcoming", len(next)).Int("rooms", len(portals)).Msg("Synced upcoming meetings")
+	log.Debug().Int("events", len(events)).Int("upcoming", len(next)).Int("rooms", len(portals)).
+		Bool("partial", !gap.IsZero()).Msg("Synced upcoming meetings")
 	for _, portal := range portals {
-		text := ""
-		if ev, ok := next[teamsid.ParsePortalID(portal.ID)]; ok {
-			text = upcomingNoticeText(ev)
+		text, known := upcomingText(next, gap, teamsid.ParsePortalID(portal.ID))
+		if !known {
+			continue
 		}
 		if err := t.setUpcomingNotice(ctx, portal, text); err != nil {
 			log.Err(err).Str("portal_id", string(portal.ID)).Msg("Failed to update the upcoming meeting notice")
 		}
+	}
+	return true
+}
+
+type calendarLister func(ctx context.Context, from, to time.Time) ([]msteams.CalendarEvent, error)
+
+// fetchUpcoming asks for the whole window, then day by day when Teams fails it, so a day Teams cannot answer
+// costs that day alone. gap is the start of the first day left unanswered, zero when none.
+func fetchUpcoming(ctx context.Context, list calendarLister, now time.Time, bound time.Duration) (events []msteams.CalendarEvent, gap time.Time, ok bool) {
+	log := zerolog.Ctx(ctx)
+	end := now.Add(upcomingWindow)
+	whole, err := list(ctx, now, end)
+	if err == nil {
+		return whole, time.Time{}, true
+	}
+	if !msteams.IsServerError(err) {
+		log.Err(err).Msg("Failed to fetch the Teams calendar")
+		return nil, time.Time{}, false
+	}
+	log.Warn().Err(err).Msg("Teams failed the calendar's whole window; fetching it day by day")
+	dayCtx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	answered := 0
+	for from := now; from.Before(end); from = from.Add(calendarDay) {
+		day, err := list(dayCtx, from, from.Add(calendarDay))
+		if ctx.Err() != nil {
+			return nil, time.Time{}, false
+		}
+		if err != nil {
+			if gap.IsZero() {
+				gap = from
+			}
+			if dayCtx.Err() != nil {
+				log.Error().Time("from", from).Msg("The calendar's day-by-day pass reached its bound")
+				break
+			}
+			log.Err(err).Time("from", from).Msg("Failed to fetch a day of the Teams calendar")
+			continue
+		}
+		answered++
+		events = append(events, day...)
+	}
+	log.Info().Int("answered", answered).Int("failed", int(upcomingWindow/calendarDay)-answered).
+		Msg("Fetched the Teams calendar day by day")
+	if answered == 0 {
+		log.Error().Msg("Teams answered no day of the calendar; meeting notices stay as they are")
+		return nil, gap, false
+	}
+	return events, gap, true
+}
+
+// upcomingText is a room's notice text; false when a day left unanswered could hold an earlier occurrence.
+func upcomingText(next map[string]msteams.CalendarEvent, gap time.Time, threadID string) (string, bool) {
+	ev, found := next[threadID]
+	switch {
+	case !found:
+		return "", gap.IsZero()
+	case gap.IsZero() || ev.Start.Before(gap):
+		return upcomingNoticeText(ev), true
+	default:
+		return "", false
 	}
 }
 

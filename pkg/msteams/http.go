@@ -146,7 +146,7 @@ func (c *Client) sendJSON(ctx context.Context, method, url string, auth AuthKind
 			Str("method", method).Str("url", url).
 			Int("status", resp.StatusCode).Bytes("body", data).
 			Msg("Teams API: error")
-		return nil, fmt.Errorf("msteams: %s %s: %d %s", method, url, resp.StatusCode, string(data))
+		return nil, &StatusError{Method: method, URL: url, Status: resp.StatusCode, Body: string(data)}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)

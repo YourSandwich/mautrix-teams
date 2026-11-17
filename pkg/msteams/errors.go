@@ -15,7 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package msteams
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	ErrNotImplemented = errors.New("msteams: not implemented")
@@ -39,4 +42,20 @@ var (
 
 func IsCredentialError(err error) bool {
 	return errors.Is(err, ErrTokenInvalid) || errors.Is(err, ErrTokenExpired) || errors.Is(err, ErrUnauthorized)
+}
+
+// StatusError is an error status from Teams that has no sentinel of its own.
+type StatusError struct {
+	Method, URL string
+	Status      int
+	Body        string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("msteams: %s %s: %d %s", e.Method, e.URL, e.Status, e.Body)
+}
+
+func IsServerError(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status >= 500
 }
