@@ -194,11 +194,7 @@ func (tc *TeamsConnector) Start(ctx context.Context) error {
 	return nil
 }
 
-// disableAppserviceFeatures turns off what needs the appservice Matrix
-// connector and its homeserver: Element Call (MatrixRTC state events, OpenID,
-// TURN) and ghost presence. Under another bridgev2.MatrixConnector the bridge
-// then runs as a chat bridge instead of failing at each call or presence
-// update.
+// disableAppserviceFeatures turns off Element Call and ghost presence, which need the appservice connector.
 func (tc *TeamsConnector) disableAppserviceFeatures(ctx context.Context) {
 	if tc.Config.Calls.ElementCall || tc.Config.Presence.SyncTeamsPresence {
 		zerolog.Ctx(ctx).Info().
