@@ -6,6 +6,39 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Tracks mautrix-go `v0.33.0` (#4, thanks to @davidj4tech).
+
+### Added
+
+- The bridge runs under a bridgev2 Matrix connector other than mautrix-go's
+  appservice one, as on-device bridges do. Element Call and Teams presence
+  need the appservice connector, so there they turn off with one log line
+  instead of failing at every call or presence update (#5, thanks to
+  @davidj4tech).
+
+### Changed
+
+- On its first start the bridge upgrades its database for mautrix-go
+  `v0.33.0`. With encryption on, 32.0 refuses to start on the upgraded
+  database, so going back needs a backup from before the upgrade.
+
+### Fixed
+
+- When Teams fails to send the calendar's next two weeks at once, the bridge
+  asks for them day by day, so the pinned notices of
+  `calls.upcoming_meetings` stay current for the days Teams answers. Notices
+  of meetings after the first day Teams didn't answer stay as they were. A
+  pass Teams answers nothing of is tried again after 2 and then 10 minutes
+  instead of an hour.
+
+### Security
+
+- Dependencies with published advisories are updated: grpc `v1.83.2`,
+  klauspost/compress `v1.20.2` and cel-go `v0.30.0`. The bridge doesn't call
+  the affected code.
+- golang.org/x/net `v0.62.0`, which comes with the mautrix-go update, fixes
+  slow parsing of crafted HTML (GO-2026-6860), code the bridge does reach.
+
 ## [32.0] - 2026-11-13
 
 Tracks mautrix-go `v0.32.0`.
