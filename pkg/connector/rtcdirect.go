@@ -152,7 +152,7 @@ func (t *TeamsClient) bridgeMembers(ctx context.Context, roomID id.RoomID) []*ap
 			intent = ghost.Intent
 		}
 		if as, ok := intent.(*matrix.ASIntent); ok {
-			out = append(out, as.Matrix)
+			out = append(out, as.Matrix())
 		}
 	}
 	return out

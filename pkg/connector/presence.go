@@ -59,11 +59,11 @@ func (t *TeamsClient) setGhostPresence(ctx context.Context, p *msteams.Presence)
 		return
 	}
 	presence, status := matrixPresence(p)
-	if err := intent.Matrix.EnsureRegistered(ctx); err != nil {
+	if err := intent.Matrix().EnsureRegistered(ctx); err != nil {
 		log.Debug().Err(err).Msg("Failed to register ghost for presence")
 		return
 	}
-	if err := intent.Matrix.SetPresence(ctx, mautrix.ReqPresence{Presence: presence, StatusMsg: status}); err != nil {
+	if err := intent.Matrix().SetPresence(ctx, mautrix.ReqPresence{Presence: presence, StatusMsg: status}); err != nil {
 		log.Debug().Err(err).Msg("Failed to set ghost presence")
 	}
 }
